@@ -1,0 +1,11 @@
+# Secret files
+.env
+qr_key.key
+active_config.json
+
+# Python/development files
+__pycache__/
+*.py[cod]
+*.env.local
+venv/
+.vscode/

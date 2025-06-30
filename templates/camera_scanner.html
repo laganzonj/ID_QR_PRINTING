@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Camera Scanner</title>
+  </head>
+  <body>
+    <h2>Scan your ID</h2>
+    <video id="video" autoplay playsinline width="640" height="480"></video>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        const video = document.getElementById("video");
+
+        if (!video) {
+          alert("Video element not found.");
+          return;
+        }
+
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            video.srcObject = stream;
+          })
+          .catch((err) => {
+            alert("Camera access failed: " + err.message);
+          });
+      });
+    </script>
+  </body>
+</html>

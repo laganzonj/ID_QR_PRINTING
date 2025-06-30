@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>
+      Print Preview - {{ "%.2f"|format(w|float) }}" × {{ "%.2f"|format(h|float)
+      }}"
+    </title>
+    <style>
+        @page {
+            size: {{ w }}in {{ h }}in;
+            margin: 0;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: #f5f7fa;
+            height: 100%;
+            position: relative;
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+        .preview-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        .preview-header {
+            position: sticky;
+            top: 0;
+            background: linear-gradient(135deg, #6e48aa 0%, #9d50bb 100%);
+            color: white;
+            padding: 15px 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .preview-title {
+            font-weight: 600;
+            font-size: 18px;
+        }
+        .paper-size {
+            background: rgba(255,255,255,0.2);
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .preview-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .preview-btn {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+            backdrop-filter: blur(5px);
+        }
+        .preview-btn:hover {
+            background: rgba(255,255,255,0.3);
+            transform: translateY(-2px);
+        }
+        .preview-btn i {
+            font-size: 14px;
+        }
+        .preview-content {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            overflow: auto;
+        }
+        .paper {
+            width: {{ w }}in;
+            height: {{ h }}in;
+            background: white;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .paper img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        @media print {
+          .preview-header {
+              display: none !important;
+          }
+          html, body {
+              background: white;
+              height: auto;
+          }
+          .preview-container {
+              height: auto;
+          }
+          .paper {
+              box-shadow: none;
+              width: 100% !important;
+              height: 100% !important;
+              page-break-after: always;
+          }
+          .paper img {
+              width: 100% !important;
+              height: auto !important;
+              object-fit: contain !important;
+          }
+      }
+
+        @media (max-width: 768px) {
+            .preview-header {
+                flex-direction: column;
+                gap: 10px;
+                padding: 12px;
+            }
+            .header-left {
+                flex-direction: column;
+                gap: 5px;
+                text-align: center;
+            }
+            .preview-actions {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+    </style>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+    />
+  </head>
+  <body>
+    <div class="preview-container">
+      <div class="preview-header">
+        <div class="header-left">
+          <span class="preview-title">Print Preview</span>
+          <span class="paper-size"
+            >{{ "%.2f"|format(w|float) }}" × {{ "%.2f"|format(h|float) }}"</span
+          >
+        </div>
+        <div
+          style="
+            position: absolute;
+            bottom: 5px;
+            right: 5px;
+            opacity: 0.7;
+            pointer-events: none;
+            font-size: 8px;
+          "
+        >
+          <img
+            src="{{ url_for('static', filename='trademark/blurbgicon.png') }}"
+            width="20"
+          />
+          ©2025 jLagzn
+        </div>
+        <div class="preview-actions">
+          <button class="preview-btn" id="backBtn">
+            <i class="fas fa-arrow-left"></i> <span>Back</span>
+          </button>
+          <button class="preview-btn" id="printBtn">
+            <i class="fas fa-print"></i> <span>Print</span>
+          </button>
+          <button class="preview-btn" id="closeBtn">
+            <i class="fas fa-times"></i> <span>Close</span>
+          </button>
+        </div>
+      </div>
+      <div class="preview-content">
+        <div class="paper">
+          <img
+            src="{{ url_for('static', filename='preview_' + session_id + '.png') }}"
+            alt="Print Preview"
+          />
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Enhanced navigation handling
+      document.getElementById("backBtn").addEventListener("click", function () {
+        // Return to scanner page with preserved settings
+        if (
+          document.referrer &&
+          document.referrer.includes(window.location.hostname)
+        ) {
+          window.location.href = document.referrer;
+        } else {
+          window.location.href = "/";
+        }
+      });
+
+      // Print button handler
+      document
+        .getElementById("printBtn")
+        .addEventListener("click", function () {
+          // Use the browser's native print dialog
+          window.print();
+        });
+
+      // Close button handler
+      document
+        .getElementById("closeBtn")
+        .addEventListener("click", function () {
+          if (window.opener) {
+            window.close();
+          } else {
+            window.location.href = "/";
+          }
+        });
+
+      // Auto-print with better handling
+      if (document.referrer.includes("/print_image_direct")) {
+        const img = document.querySelector(".paper img");
+        const checkPrintReady = () => {
+          // Ensure image is fully loaded and dimensions are correct
+          if (img.complete && img.naturalWidth > 0) {
+            // Optional: Add a slight delay to ensure everything is ready
+            setTimeout(() => {
+              // Show print dialog but don't automatically submit
+              // This gives user final control before printing
+              window.print();
+            }, 300);
+          } else {
+            setTimeout(checkPrintReady, 100);
+          }
+        };
+
+        // Start checking when image loads
+        if (img.complete) {
+          checkPrintReady();
+        } else {
+          img.onload = checkPrintReady;
+        }
+      }
+
+      // Make the window.print() function more reliable
+      window.safePrint = function () {
+        const beforePrint = () => {
+          console.log("Preparing for print...");
+        };
+
+        const afterPrint = () => {
+          console.log("Print completed or canceled");
+          // Optional: Close window after printing
+          // if (window.opener) {
+          //     setTimeout(() => window.close(), 1000);
+          // }
+        };
+
+        window.addEventListener("beforeprint", beforePrint);
+        window.addEventListener("afterprint", afterPrint);
+
+        window.print();
+      };
+    </script>
+  </body>
+</html>

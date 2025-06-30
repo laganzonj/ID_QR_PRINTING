@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart QR ID Scanner</title>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/index.css') }}"
+    />
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/button.css') }}"
+    />
+  </head>
+<body class="bg-light">
+    <!-- Modal Overlay (shown on load) -->
+    <div id="settingsModal" class="modal-overlay">
+        <div id="activatePanel" class="bg-white p-4 rounded-lg shadow-lg" style="width: 90%; max-width: 600px; position: relative">
+            <button class="close-btn" onclick="closeSettingsModal()">
+                <i class="fas fa-times"></i>
+            </button>
+
+            <h4 class="mb-4 text-center">Please Configure Your Settings</h4>
+
+            <div class="mb-4">
+                <strong>📄 Current Active Dataset:</strong>
+                <div class="d-flex align-items-center gap-2 mt-2">
+                    <span id="current-dataset" class="text-truncate" style="max-width: 100%">
+                        {{ active_dataset }}
+                    </span>
+                    <button class="btn btn-sm btn-outline-primary" onclick="triggerFile('dataset')">
+                        Replace
+                    </button>
+                </div>
+                <input type="file" name="dataset_file" accept=".csv" class="form-control mt-2 d-none" id="datasetInput" />
+            </div>
+
+            <div class="mb-4">
+                <strong>🖼️ Current Active Template:</strong>
+                <div class="d-flex align-items-center gap-2 mt-2">
+                    <span id="current-template" class="text-truncate" style="max-width: 100%">
+                        {{ active_template }}
+                    </span>
+                    <button class="btn btn-sm btn-outline-primary" onclick="triggerFile('template')">
+                        Replace
+                    </button>
+                </div>
+                <input type="file" name="template_file" accept=".png,.jpg,.jpeg" class="form-control mt-2 d-none" id="templateInput" />
+            </div>
+
+            <div class="mb-4">
+                <strong>📝 Paper Size:</strong>
+                <div class="paper-size-control mt-2">
+                    <select id="paperSize" class="form-select">
+                        <option value="">Please select paper size</option>
+                        <option value="A4">A4 (210 × 297 mm)</option>
+                        <option value="Letter">Letter (216 × 279 mm)</option>
+                        <option value="Legal">Legal (216 × 356 mm)</option>
+                        <option value="A3">A3 (297 × 420 mm)</option>
+                        <option value="A5">A5 (148 × 210 mm)</option>
+                        <option value="A6">A6 (105 × 148 mm)</option>
+                        <option value="A7">A7 (74 × 100 mm)</option>
+                        <option value="B5">B5 (182 × 257 mm)</option>
+                        <option value="B4">B4 (250 × 353 mm)</option>
+                        <option value="4x6">4 × 6 in (10.16 × 15.24 cm)</option>
+                        <option value="5x7">5 × 7 in (12.7 × 17.8 cm)</option>
+                        <option value="5x8">5 × 8 in (12.7 × 20.32 cm)</option>
+                        <option value="9x13">3.5 × 5 in (8.9 × 12.7 cm)</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                    <div class="paper-size-note">
+                        Please choose the appropriate paper size for printing
+                    </div>
+
+                    <div id="customSizeFields" style="display: none; margin-top: 10px">
+                        <input type="number" id="customWidth" placeholder="Width (in)" step="0.01" class="form-control form-control-sm mb-2" style="max-width: 140px" />
+                        <input type="number" id="customHeight" placeholder="Height (in)" step="0.01" class="form-control form-control-sm" style="max-width: 140px" />
+                    </div>
+                </div>
+                
+                <div class="form-check text-start mt-3">
+                    <input class="form-check-input" type="checkbox" id="previewBeforePrint" />
+                    <label class="form-check-label" for="previewBeforePrint">
+                        Show print preview before printing
+                    </label>
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mt-3">
+                <div style="font-size: 11px; opacity: 0.7;">
+                    <img src="{{ url_for('static', filename='trademark/blurbgicon.png') }}" width="16">
+                    ID System v1.0 © 2025 jLagzn STUDIO
+                </div>
+                <button class="btn btn-gradient" onclick="submitSettings()">
+                    <i class="fas fa-check me-1"></i> Confirm Settings
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="container py-5">
+        {% if success %}
+        <div id="successAlert" class="alert alert-success alert-dismissible fade show" role="alert">
+            ✅ Activation successful. Dataset and/or template updated.
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+        {% endif %}
+
+        <div class="d-flex justify-content-start mb-3">
+            <button class="settingbtn" onclick="openSettingsModal()">
+                <div id="container-stars">
+                    <div id="stars"></div>
+                </div>
+                <div id="glow">
+                    <div class="circle"></div>
+                    <div class="circle"></div>
+                </div>
+                <strong><i class="fas fa-cog"></i> Settings</strong>
+            </button>
+        </div>
+        
+      <!-- Main Panel -->
+      <div class="card shadow-lg border-0 rounded p-4">
+        <div class="d-flex flex-wrap justify-content-between gap-4">
+          <!-- ID Template Preview (left side) -->
+          <div
+            class="preview-section flex-grow-1"
+            style="flex-basis: 0; min-width: 0"
+          >
+            <h5 class="section-title mb-2">ID Template Preview</h5>
+            <div
+              id="paperBoundary" class="d-flex align-items-center justify-content-center" 
+              style="background-image: url('{{ url_for("static", filename="id_templates/" + active_template) }}')">
+            >
+              <div
+                id="scaledPreviewWrapper"
+                style="transform: scale(1); transform-origin: center center"
+              >
+                <div
+                  id="idPreviewContainer"
+                  style="
+                    position: relative;
+                    background: white;
+                    box-sizing: content-box;
+                  "
+                >
+                  <img
+                    id="id-template-preview"
+                    src="{{ url_for('static', filename='id_templates/' + active_template) }}?v={{ config['active_dataset'] }}"
+                    alt="ID Template Preview"
+                    style="
+                      width: 100%;
+                      height: 100%;
+                      object-fit: contain;
+                      background-color: white;
+                      display: block;
+                      z-index: 1;
+                      position: relative;
+                    "
+                  />
+                  <div
+                    class="position-absolute id-overlay"
+                    style="
+                      inset: 0;
+                      display: flex;
+                      flex-direction: column;
+                      justify-content: center;
+                      align-items: center;
+                      pointer-events: none;
+                      z-index: 2;
+                      color: black;
+                      text-align: center;
+                    "
+                  >
+                    <div id="preview-id" style="font-weight: bold">000</div>
+                    <div style="height: 1rem"></div>
+                    <div id="preview-name" style="font-weight: bold">
+                      Name Here
+                    </div>
+                    <div id="preview-position">Position</div>
+                    <div id="preview-company" style="font-weight: bold">
+                      Company
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div style="position: absolute; bottom: 5px; right: 5px; opacity: 0.7; pointer-events: none; font-size: 8px;">
+              <img src="{{ url_for('static', filename='trademark/blurbgicon.png') }}" width="20">
+              ©2025 jLagzn
+            </div>
+          </div>
+
+          <!-- Scanner and ID Info (right side) -->
+          <div
+            class="scanner-section flex-grow-1"
+            style="flex-basis: 0; min-width: 0; max-width: 500px"
+          >
+            <h5 class="section-title mb-2">Smart QR ID Scanner</h5>
+
+            <div id="alertBox" class="alert d-none" role="alert"></div>
+            <div class="text-center mb-2">
+              <div
+                class="spinner-border text-light d-none"
+                id="loadingSpinner"
+              ></div>
+            </div>
+
+            <div class="d-flex justify-content-center mb-3">
+              <div
+                id="reader"
+                class="border rounded shadow-sm bg-white"
+                style="
+                  width: 100%;
+                  max-width: 320px;
+                  height: auto;
+                  aspect-ratio: 4 / 3;
+                "
+              ></div>
+            </div>
+
+            <div class="mt-4">
+              <h5 class="section-title mb-2">ID Info</h5>
+              <div class="border rounded p-3 bg-white shadow-sm">
+                <p><strong>ID:</strong> <span id="id"></span></p>
+                <p><strong>Name:</strong> <span id="name"></span></p>
+                <p><strong>Position:</strong> <span id="position"></span></p>
+                <p><strong>Company:</strong> <span id="company"></span></p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer style="text-align: center; padding: 20px 10px 10px; font-size: 12px; border-top: 1px solid #eee; margin-top: 30px;">
+        <img src="{{ url_for('static', filename='trademark/blurbgicon.png') }}" width="20" alt="Logo">
+          ID System v1.0 © 2025 jLagzn STUDIO | All rights reserved
+      </footer>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script>
+      // Global variables
+      const alertBox = document.getElementById("alertBox");
+      const spinner = document.getElementById("loadingSpinner");
+      let html5QrCode = null;
+      let scannerActive = false;
+      let datasetFile = null;
+      let templateFile = null;
+      let settingsConfigured = false;
+
+      const paperSizeMap = {
+        A4: [8.27, 11.69],
+        Letter: [8.5, 11],
+        Legal: [8.5, 14],
+        A3: [11.7, 16.5],
+        A5: [5.8, 8.3],
+        A6: [4.1, 5.8],
+        A7: [2.9, 3.9],
+        B5: [7.2, 10.1],
+        B4: [9.8, 13.9],
+        "4x6": [4, 6],
+        "5x7": [5, 7],
+        "5x8": [5, 8],
+        "9x13": [3.5, 5]
+      };
+
+      // Initialize on DOM load
+      document.addEventListener("DOMContentLoaded", function() {
+        // Show settings modal on first load
+        if (!settingsConfigured) {
+          document.getElementById("settingsModal").style.display = "flex";
+        }
+
+        // Show success alert if needed
+        {% if success %}
+        document.getElementById("successAlert").classList.remove("d-none");
+        setTimeout(() => {
+          const alertBox = document.getElementById("successAlert");
+          if (alertBox) alertBox.remove();
+        }, 3000);
+        {% endif %}
+
+        // Set up paper size controls
+        setupPaperSizeControls();
+      });
+
+      // Modal functions
+      function openSettingsModal() {
+        document.getElementById("settingsModal").style.display = "flex";
+      }
+
+      function closeSettingsModal() {
+        document.getElementById("settingsModal").style.display = "none";
+      }
+
+      function submitSettings() {
+        const paperSize = document.getElementById("paperSize").value;
+        if (!paperSize) {
+          showAlert("Please select a paper size", "warning");
+          return;
+        }
+
+        settingsConfigured = true;
+        closeSettingsModal();
+        initCamera();
+      }
+
+      // Camera functions
+      function initCamera() {
+        if (html5QrCode) return;
+
+        html5QrCode = new Html5Qrcode("reader");
+        startCamera();
+      }
+
+      function startCamera() {
+        if (scannerActive || !settingsConfigured) return;
+
+        scannerActive = true;
+        html5QrCode.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: 250 },
+          (decodedText) => {
+            scannerActive = false;
+            html5QrCode.stop().then(() => {
+              fetchData(decodedText.trim());
+            });
+          },
+          (error) => {
+            scannerActive = false;
+            console.error("QR Scanner error:", error);
+          }
+        ).catch((err) => {
+          scannerActive = false;
+          showAlert("Camera error: " + err.message, "danger");
+        });
+      }
+
+      // Data handling
+      function clearFields() {
+        ["id", "name", "position", "company"].forEach(
+          (id) => (document.getElementById(id).textContent = "")
+        );
+      }
+
+      function fetchData(qrContent) {
+        clearFields();
+        spinner.classList.remove("d-none");
+
+        fetch("/get_data", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ qr_content: qrContent }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            spinner.classList.add("d-none");
+
+            if (data.error) {
+              showAlert("❌ Record not found or invalid QR code", "danger");
+              resetSystem();
+              return;
+            }
+
+            // Update display fields
+            ["ID", "Name", "Position", "Company"].forEach((field) => {
+              document.getElementById(field.toLowerCase()).textContent = data[field];
+            });
+
+            // Update preview
+            document.getElementById("preview-id").textContent = String(data["ID"]).padStart(3, "0");
+            document.getElementById("preview-name").textContent = data["Name"];
+            document.getElementById("preview-position").textContent = data["Position"];
+            document.getElementById("preview-company").textContent = data["Company"];
+
+            // Auto print
+            printAndRestart();
+          })
+          .catch((err) => {
+            spinner.classList.add("d-none");
+            showAlert("Fetch error: " + err.message, "danger");
+            resetSystem();
+          });
+      }
+
+      // Printing functions
+      function printAndRestart() {
+        const preview = document.getElementById("idPreviewContainer");
+        const wrapper = document.getElementById("scaledPreviewWrapper");
+        const paperSize = document.getElementById("paperSize").value;
+        const customWidth = parseFloat(document.getElementById("customWidth").value) || 3.375;
+        const customHeight = parseFloat(document.getElementById("customHeight").value) || 2.125;
+        const showPreview = document.getElementById("previewBeforePrint").checked;
+
+        const TARGET_DPI = 300;
+        const SCREEN_PPI = 96;
+        const scale = TARGET_DPI / SCREEN_PPI;
+
+        const originalTransform = wrapper.style.transform;
+        wrapper.style.transform = "scale(1)";
+
+        html2canvas(preview, {
+            scale: scale,
+            useCORS: true,
+            allowTaint: true,
+            backgroundColor: null,
+        }).then((canvas) => {
+            wrapper.style.transform = originalTransform;
+
+            const base64Image = canvas.toDataURL("image/png");
+
+            const payload = {
+                image_base64: base64Image,
+                paper_size: paperSize,
+                custom_width: customWidth,
+                custom_height: customHeight,
+                // Add this flag to indicate we're coming from preview
+                from_preview: window.location.pathname.includes('show_preview')
+            };
+
+            if (paperSize !== "custom") {
+                delete payload.custom_width;
+                delete payload.custom_height;
+            }
+
+            // Skip preview if we're already in preview or if preview is disabled
+            if (showPreview && !payload.from_preview) {
+                payload.redirect = true;
+            }
+
+            fetch("/print_image_direct", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            })
+            .then((res) => res.json())
+            .then((result) => {
+                if (result.success) {
+                    if (result.preview_url && !payload.from_preview) {
+                        window.location.href = result.preview_url;
+                    } else {
+                        // If coming from preview or preview disabled, just reset
+                        setTimeout(() => resetSystem(), 1000);
+                    }
+                } else {
+                    showAlert("❌ Failed to print: " + (result.error || "Unknown error"), "danger");
+                    resetSystem();
+                }
+            })
+            .catch((err) => {
+                showAlert("❌ Network error: " + err.message, "danger");
+                resetSystem();
+            });
+        });
+    }
+
+      function resetSystem() {
+        clearFields();
+        startCamera();
+      }
+
+      // Settings panel functions
+      function triggerFile(type) {
+        document.getElementById(`${type}Input`).click();
+      }
+
+      function submitActivation() {
+        if (!datasetFile && !templateFile) {
+          showAlert("Please select at least a dataset or template file.", "warning");
+          return;
+        }
+
+        const formData = new FormData();
+        if (datasetFile) formData.append("dataset_file", datasetFile);
+        if (templateFile) formData.append("template_file", templateFile);
+        formData.append("triggeredBy", "manual");
+
+        fetch("/activate", {
+          method: "POST",
+          body: formData,
+        })
+          .then((res) => {
+            if (res.redirected) {
+              window.location.href = res.url;
+            } else {
+              showAlert("Activation failed.", "danger");
+            }
+          })
+          .catch((err) => {
+            showAlert("Error during activation: " + err.message, "danger");
+          });
+      }
+
+      // Paper size functions
+      function setupPaperSizeControls() {
+        const paperSelect = document.getElementById("paperSize");
+        const customFields = document.getElementById("customSizeFields");
+
+        paperSelect.addEventListener("change", function() {
+          if (this.value === "custom") {
+            customFields.style.display = "block";
+            return;
+          }
+          customFields.style.display = "none";
+          setPaperSize(this.value);
+        });
+
+        document.getElementById("customWidth").addEventListener("input", applyCustomSize);
+        document.getElementById("customHeight").addEventListener("input", applyCustomSize);
+
+        // Set default size if one is already selected
+        if (paperSelect.value) {
+          setPaperSize(paperSelect.value);
+        }
+      }
+
+      function setPaperSize(size) {
+        if (size === "custom") return;
+
+        const [width, height] = paperSizeMap[size] || paperSizeMap["A4"];
+        updatePreviewSize(width, height);
+      }
+
+      function applyCustomSize() {
+        const width = parseFloat(document.getElementById("customWidth").value);
+        const height = parseFloat(document.getElementById("customHeight").value);
+
+        if (width && height) {
+          updatePreviewSize(width, height);
+        }
+      }
+
+      function updatePreviewSize(widthInInches, heightInInches) {
+        const DPI = 96;
+        const MARGIN_MM = 1;
+        const MARGIN_IN = MARGIN_MM / 25.4;
+        const maxFramePx = 500;
+        const paddingPercent = 0.05;
+
+        const widthPx = (widthInInches - 2 * MARGIN_IN) * DPI;
+        const heightPx = (heightInInches - 2 * MARGIN_IN) * DPI;
+
+        const availableWidth = maxFramePx * (1 - 2 * paddingPercent);
+        const availableHeight = maxFramePx * (1 - 2 * paddingPercent);
+        const scale = Math.min(availableWidth / widthPx, availableHeight / heightPx);
+
+        const preview = document.getElementById("idPreviewContainer");
+        preview.style.width = `${widthPx}px`;
+        preview.style.height = `${heightPx}px`;
+
+        const wrapper = document.getElementById("scaledPreviewWrapper");
+        wrapper.style.transform = `scale(${scale})`;
+
+        // Font scaling
+        const baseFontSizePx = 16;
+        const referenceHeightInches = 5.8;
+        const fontScale = heightInInches / referenceHeightInches;
+
+        document.getElementById("preview-id").style.fontSize = `${Math.round(baseFontSizePx * 1.8 * fontScale)}px`;
+        document.getElementById("preview-name").style.fontSize = `${Math.round(baseFontSizePx * 1.4 * fontScale)}px`;
+        document.getElementById("preview-position").style.fontSize = `${Math.round(baseFontSizePx * 1.1 * fontScale)}px`;
+        document.getElementById("preview-company").style.fontSize = `${Math.round(baseFontSizePx * 1.3 * fontScale)}px`;
+      }
+
+      // Helper functions
+      function showAlert(message, type) {
+        alertBox.className = `alert alert-${type}`;
+        alertBox.textContent = message;
+        alertBox.classList.remove("d-none");
+        setTimeout(() => alertBox.classList.add("d-none"), 3000);
+      }
+
+      // File input handlers
+      document.getElementById("datasetInput").addEventListener("change", function(e) {
+        datasetFile = e.target.files[0];
+        document.getElementById("current-dataset").textContent = datasetFile.name;
+      });
+
+      document.getElementById("templateInput").addEventListener("change", function(e) {
+        templateFile = e.target.files[0];
+        document.getElementById("current-template").textContent = templateFile.name;
+      });
+
+      // Set dynamic background from template image
+      const templateImg = document.getElementById("id-template-preview");
+      templateImg.onload = function() {
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        canvas.width = 1;
+        canvas.height = 1;
+        context.drawImage(templateImg, 0, 0, 1, 1);
+        const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+        const color = `rgb(${r}, ${g}, ${b})`;
+        document.getElementById("paperBoundary").style.background = `radial-gradient(circle, ${color}, #000)`;
+      };
+    </script>
+  </body>
+</html>
