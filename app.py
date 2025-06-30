@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
 
 QR_FOLDER = os.path.join(BASE_DIR, "static", "qr_codes")
 DATASET_DIR = os.path.join(BASE_DIR, "participant_list")
