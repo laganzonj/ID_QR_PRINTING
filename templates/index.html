@@ -156,7 +156,7 @@
                 >
                   <img
                     id="id-template-preview"
-                    src="{{ get_template_preview_url(active_template) }}?v={{ config['active_dataset'] }}"
+                    src="{{ get_template_preview_url(active_template) }}?v={{ config.get('active_dataset', '') }}"
                     alt="ID Template Preview"
                     style="
                       width: 100%;

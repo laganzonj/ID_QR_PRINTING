@@ -24,6 +24,8 @@ import time
 load_dotenv()
 
 app = Flask(__name__, static_folder='static')
+
+
 BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
 
 # For persistent storage (Render disk volume)
@@ -105,15 +107,20 @@ def get_template_path(filename):
 
 def get_template_preview_url(template_filename):
     """Returns URL for template from either persistent storage or static files"""
+    # Check persistent storage first
     persistent_path = os.path.join(TEMPLATE_DIR, template_filename)
-    static_path = os.path.join(app.static_folder, 'id_templates', template_filename)
-    
     if os.path.exists(persistent_path):
         return url_for('serve_persistent_template', filename=template_filename)
-    elif os.path.exists(static_path):
+    
+    # Fall back to static files
+    static_path = os.path.join(app.static_folder, 'id_templates', template_filename)
+    if os.path.exists(static_path):
         return url_for('static', filename=f'id_templates/{template_filename}')
-    else:
-        return url_for('static', filename='id_templates/default_template.png')
+    
+    # Default fallback
+    return url_for('static', filename='id_templates/default_template.png')
+
+app.jinja_env.globals.update(get_template_preview_url=get_template_preview_url)
 
 @app.route("/first-run")
 def first_run_setup():
@@ -450,6 +457,7 @@ def index():
         
         return render_template(
             "index.html",
+            config=config,
             files=sorted(os.listdir(QR_FOLDER), reverse=True) if os.path.exists(QR_FOLDER) else [],
             success=success,
             active_template=config.get("active_template"),
