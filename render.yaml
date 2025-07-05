@@ -2,6 +2,21 @@ services:
   - type: web
     name: id-qr-printing
     runtime: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app"
+    pythonVersion: "3.10.8" # Matches your runtime.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      python generate_qr_key.py  # Generate key if not exists
+    startCommand: "gunicorn --workers 4 --threads 2 --timeout 120 app:app"
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true # Let Render generate a secure key
+      - key: BASE_DIR
+        value: /opt/render/project/src
     plan: free
+    env: python
+    autoDeploy: true
+    healthCheckPath: /
+    disk:
+      name: data_volume
+      mountPath: /opt/render/project/src/static
+      sizeGB: 1
