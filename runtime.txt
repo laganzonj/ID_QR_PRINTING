@@ -1,1 +1,5 @@
+<<<<<<< HEAD
 python-3.13.1
+=======
+python-3.10.8
+>>>>>>> 8ca7a8c (Fix: remove nested git repo)
