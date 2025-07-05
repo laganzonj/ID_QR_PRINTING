@@ -27,12 +27,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import win32print
 import base64
+from functools import lru_cache
+import concurrent.futures
 
 load_dotenv()
 
 app = Flask(__name__, static_folder='static')
-
-
 BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
 
 # For persistent storage (Render disk volume)
@@ -763,61 +763,82 @@ def print_id():
         c.drawImage(ImageReader(img_buffer), 0, 0, width=1013, height=638)
         c.save()
 
-        # Check printer availability first
-        printer_available = False
-        if platform.system() == "Windows":
-            try:
-                import win32print
-                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL)
-                printer_available = len(printers) > 0
-            except:
-                pass
-        else:
-            try:
-                result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
-                printer_available = "printer" in result.stdout.lower() and "enabled" in result.stdout.lower()
-            except:
-                pass
-
-        if not printer_available:
-            return {
-                "success": False,
-                "error": "No printer detected or printer not available",
-                "download_url": url_for('download_file', filename=output_filename, _external=True),
-                "message": "Document saved and available for download"
-            }, 503  # Service Unavailable
-
-        # Try printing with different methods
-        print_success = False
-        print_error = None
+        # Improved printer detection
+        printer_detected = False
+        printer_name = None
         
         if platform.system() == "Windows":
             try:
+                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+                if printers:
+                    printer_detected = True
+                    printer_name = printers[0][2]  # Default to first printer
+            except Exception as e:
+                app.logger.error(f"Windows printer detection failed: {str(e)}")
+        else:
+            try:
+                # Try CUPS first
+                result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
+                if "enabled" in result.stdout.lower():
+                    printer_detected = True
+                    # Extract printer name from output
+                    lines = result.stdout.split('\n')
+                    if lines and ' ' in lines[0]:
+                        printer_name = lines[0].split(' ')[1]
+            except FileNotFoundError:
+                try:
+                    # Fall back to LPR
+                    result = subprocess.run(["lpstat", "-a"], capture_output=True, text=True)
+                    if result.stdout.strip():
+                        printer_detected = True
+                except:
+                    pass
+
+        if not printer_detected:
+            return {
+                "success": False,
+                "error": "No printer detected",
+                "download_url": url_for('download_file', filename=output_filename, _external=True),
+                "message": "Document saved and available for download"
+            }, 503
+
+        # Improved printing function
+        print_success = False
+        print_error = None
+        
+        try:
+            if platform.system() == "Windows":
+                if printer_name:
+                    win32print.SetDefaultPrinter(printer_name)
                 os.startfile(output_path, "print")
                 print_success = True
-            except Exception as e:
-                print_error = str(e)
-        else:
-            for cmd in ["lp", "lpr"]:
+            else:
+                print_cmd = ["lp"]
+                if printer_name:
+                    print_cmd.extend(["-d", printer_name])
+                print_cmd.append(output_path)
+                
                 try:
-                    subprocess.run([cmd, output_path], check=True, timeout=10)
+                    subprocess.run(print_cmd, check=True, timeout=10)
                     print_success = True
-                    break
-                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-                    print_error = str(e)
-                    continue
+                except subprocess.TimeoutExpired:
+                    print_error = "Print job timed out"
+                except subprocess.CalledProcessError as e:
+                    print_error = f"Print command failed with code {e.returncode}"
+        except Exception as e:
+            print_error = str(e)
 
         if not print_success:
             return {
                 "success": False,
-                "error": f"Printing failed: {print_error}",
+                "error": f"Printing failed: {print_error or 'Unknown error'}",
                 "download_url": url_for('download_file', filename=output_filename, _external=True),
                 "message": "Document saved and available for download"
-            }, 500
+            }
 
         return {
             "success": True,
-            "message": f"Print job sent for ID: {employee_id}",
+            "message": f"Print job sent to {printer_name or 'default printer'} for ID: {employee_id}",
             "download_url": url_for('download_file', filename=output_filename, _external=True)
         }
         
@@ -868,60 +889,79 @@ def print_image_direct():
                 "preview_url": url_for('show_preview', session_id=timestamp, w=custom_width, h=custom_height)
             })
 
-        # Check printer availability first
-        printer_available = False
-        if platform.system() == "Windows":
-            try:
-                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL)
-                printer_available = len(printers) > 0
-            except:
-                pass
-        else:
-            try:
-                result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
-                printer_available = "printer" in result.stdout.lower() and "enabled" in result.stdout.lower()
-            except:
-                pass
-
-        if not printer_available:
-            return {
-                "success": False,
-                "error": "No printer detected or printer not available",
-                "download_url": url_for('download_file', filename=output_filename, _external=True),
-                "message": "Document saved and available for download"
-            }, 503  # Service Unavailable
-
-        # Try printing
-        print_success = False
-        print_error = None
+        # Printer detection (same improved version as above)
+        printer_detected = False
+        printer_name = None
         
         if platform.system() == "Windows":
             try:
+                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+                if printers:
+                    printer_detected = True
+                    printer_name = printers[0][2]
+            except Exception as e:
+                app.logger.error(f"Windows printer detection failed: {str(e)}")
+        else:
+            try:
+                result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
+                if "enabled" in result.stdout.lower():
+                    printer_detected = True
+                    lines = result.stdout.split('\n')
+                    if lines and ' ' in lines[0]:
+                        printer_name = lines[0].split(' ')[1]
+            except FileNotFoundError:
+                try:
+                    result = subprocess.run(["lpstat", "-a"], capture_output=True, text=True)
+                    if result.stdout.strip():
+                        printer_detected = True
+                except:
+                    pass
+
+        if not printer_detected:
+            return {
+                "success": False,
+                "error": "No printer detected",
+                "download_url": url_for('download_file', filename=output_filename, _external=True),
+                "message": "Document saved and available for download"
+            }, 503
+
+        # Printing (same improved version as above)
+        print_success = False
+        print_error = None
+        
+        try:
+            if platform.system() == "Windows":
+                if printer_name:
+                    win32print.SetDefaultPrinter(printer_name)
                 subprocess.run(["mspaint", "/pt", output_path], check=True, timeout=10)
                 print_success = True
-            except Exception as e:
-                print_error = str(e)
-        else:
-            for cmd in ["lp", "lpr"]:
+            else:
+                print_cmd = ["lp"]
+                if printer_name:
+                    print_cmd.extend(["-d", printer_name])
+                print_cmd.append(output_path)
+                
                 try:
-                    subprocess.run([cmd, output_path], check=True, timeout=10)
+                    subprocess.run(print_cmd, check=True, timeout=10)
                     print_success = True
-                    break
-                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-                    print_error = str(e)
-                    continue
+                except subprocess.TimeoutExpired:
+                    print_error = "Print job timed out"
+                except subprocess.CalledProcessError as e:
+                    print_error = f"Print command failed with code {e.returncode}"
+        except Exception as e:
+            print_error = str(e)
 
         if not print_success:
             return {
                 "success": False,
-                "error": f"Printing failed: {print_error}",
+                "error": f"Printing failed: {print_error or 'Unknown error'}",
                 "download_url": url_for('download_file', filename=output_filename, _external=True),
                 "message": "Document saved and available for download"
             }
 
         return {
             "success": True,
-            "message": "Image sent to printer",
+            "message": f"Print job sent to {printer_name or 'default printer'}",
             "download_url": url_for('download_file', filename=output_filename, _external=True)
         }
         
