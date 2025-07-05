@@ -26,14 +26,35 @@ app = Flask(__name__, static_folder='static')
 BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
 
 # For persistent storage (Render disk volume)
-DATA_DIR = os.path.join(BASE_DIR, "data")  # New parent directory for all persistent data
+DATA_DIR = os.path.join(BASE_DIR, "data")  # Parent directory for persistent storage
+os.makedirs(DATA_DIR, exist_ok=True)  # Ensure it exists
+
+# Persistent storage paths (will be created on disk volume)
 QR_FOLDER = os.path.join(DATA_DIR, "qr_codes")
-DATASET_DIR = os.path.join(DATA_DIR, "participant_list") 
-TEMPLATE_DIR = os.path.join(DATA_DIR, "id_templates")
+DATASET_DIR = os.path.join(DATA_DIR, "participant_list")
+PERSISTENT_TEMPLATE_DIR = os.path.join(DATA_DIR, "id_templates")
 CONFIG_PATH = os.path.join(DATA_DIR, "active_config.json")
 
 # For static assets (committed to Git)
-STATIC_TEMPLATES = os.path.join(BASE_DIR, "static", "id_templates")  # Default templates
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+STATIC_TEMPLATES = os.path.join(STATIC_DIR, "id_templates")  # Default templates
+STATIC_QR_CODES = os.path.join(STATIC_DIR, "qr_codes")  # For reference/backup
+
+# Flask templates (for HTML files)
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+
+# Ensure all required directories exist at startup
+required_dirs = [
+    QR_FOLDER,
+    DATASET_DIR, 
+    PERSISTENT_TEMPLATE_DIR,
+    STATIC_TEMPLATES,
+    STATIC_QR_CODES,
+    TEMPLATES_DIR
+]
+
+for directory in required_dirs:
+    os.makedirs(directory, exist_ok=True)
 
 app.secret_key = os.getenv('SECRET_KEY')
 
