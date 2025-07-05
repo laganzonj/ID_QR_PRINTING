@@ -25,6 +25,8 @@ import atexit
 import atexit
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
+import win32print
+import base64
 
 load_dotenv()
 
@@ -748,12 +750,12 @@ def print_id():
             underline_y = y + font.size + 2
             draw.line((x, underline_y, x + text_width, underline_y), fill="black", width=1)
 
-        # Generate unique filename
+        # Generate output filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"id_{employee_id}_{timestamp}.pdf"
         output_path = os.path.join(DATA_DIR, output_filename)
-        
-        # Create PDF directly without temporary files
+
+        # Create PDF directly
         c = canvas.Canvas(output_path, pagesize=(1013, 638))
         img_buffer = BytesIO()
         id_template.save(img_buffer, format='PNG')
@@ -761,7 +763,31 @@ def print_id():
         c.drawImage(ImageReader(img_buffer), 0, 0, width=1013, height=638)
         c.save()
 
-        # Attempt printing with comprehensive fallback
+        # Check printer availability first
+        printer_available = False
+        if platform.system() == "Windows":
+            try:
+                import win32print
+                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL)
+                printer_available = len(printers) > 0
+            except:
+                pass
+        else:
+            try:
+                result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
+                printer_available = "printer" in result.stdout.lower() and "enabled" in result.stdout.lower()
+            except:
+                pass
+
+        if not printer_available:
+            return {
+                "success": False,
+                "error": "No printer detected or printer not available",
+                "download_url": url_for('download_file', filename=output_filename, _external=True),
+                "message": "Document saved and available for download"
+            }, 503  # Service Unavailable
+
+        # Try printing with different methods
         print_success = False
         print_error = None
         
@@ -772,8 +798,7 @@ def print_id():
             except Exception as e:
                 print_error = str(e)
         else:
-            # Try all possible print commands
-            for cmd in ["lp", "lpr", "lpadmin"]:
+            for cmd in ["lp", "lpr"]:
                 try:
                     subprocess.run([cmd, output_path], check=True, timeout=10)
                     print_success = True
@@ -813,7 +838,7 @@ def print_image_direct():
         if not image_data.startswith("data:image/png;base64,"):
             return {"error": "Invalid image data format"}, 400
 
-        # Generate unique filename
+        # Generate output filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"print_{timestamp}.png"
         output_path = os.path.join(DATA_DIR, output_filename)
@@ -823,7 +848,7 @@ def print_image_direct():
         img_bytes = base64.b64decode(base64_data)
         img = Image.open(BytesIO(img_bytes)).convert("RGB")
         
-        # Calculate dimensions
+        # Calculate dimensions and save
         dpi = 300
         paper_sizes = {
             "a4": (8.27, 11.69), "letter": (8.5, 11), "legal": (8.5, 14),
@@ -835,7 +860,6 @@ def print_image_direct():
         if paper_size.lower() != "custom":
             custom_width, custom_height = paper_sizes.get(paper_size.lower(), (3.375, 2.125))
 
-        # Scale and save image
         img.resize((int(custom_width * dpi), int(custom_height * dpi)), Image.LANCZOS).save(output_path, dpi=(dpi, dpi))
 
         if redirect_to_preview:
@@ -844,7 +868,30 @@ def print_image_direct():
                 "preview_url": url_for('show_preview', session_id=timestamp, w=custom_width, h=custom_height)
             })
 
-        # Attempt printing
+        # Check printer availability first
+        printer_available = False
+        if platform.system() == "Windows":
+            try:
+                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL)
+                printer_available = len(printers) > 0
+            except:
+                pass
+        else:
+            try:
+                result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
+                printer_available = "printer" in result.stdout.lower() and "enabled" in result.stdout.lower()
+            except:
+                pass
+
+        if not printer_available:
+            return {
+                "success": False,
+                "error": "No printer detected or printer not available",
+                "download_url": url_for('download_file', filename=output_filename, _external=True),
+                "message": "Document saved and available for download"
+            }, 503  # Service Unavailable
+
+        # Try printing
         print_success = False
         print_error = None
         
@@ -855,7 +902,7 @@ def print_image_direct():
             except Exception as e:
                 print_error = str(e)
         else:
-            for cmd in ["lp", "lpr", "lpadmin"]:
+            for cmd in ["lp", "lpr"]:
                 try:
                     subprocess.run([cmd, output_path], check=True, timeout=10)
                     print_success = True
@@ -881,13 +928,6 @@ def print_image_direct():
     except Exception as e:
         app.logger.error(f"Direct print failed: {str(e)}", exc_info=True)
         return {"error": f"Unexpected error: {str(e)}"}, 500
-
-@app.route("/download/<filename>")
-def download_file(filename):
-    try:
-        return send_from_directory(DATA_DIR, filename, as_attachment=True)
-    except FileNotFoundError:
-        return {"error": "File not found"}, 404
     
 @app.route("/show_preview/<session_id>")
 def show_preview(session_id):
