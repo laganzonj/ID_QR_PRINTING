@@ -1,5 +1,6 @@
 from flask import Flask, render_template, send_from_directory, jsonify, request, redirect, url_for, send_file, flash
 import pandas as pd
+import sys
 import qrcode
 import os
 import shutil
@@ -20,6 +21,9 @@ import subprocess
 import traceback
 from dotenv import load_dotenv
 import time
+import atexit
+import atexit
+from apscheduler.schedulers.background import BackgroundScheduler
 
 load_dotenv()
 
@@ -149,17 +153,47 @@ def serve_persistent_template(filename):
     """Special route for serving templates from persistent storage"""
     return send_from_directory(TEMPLATE_DIR, filename)
 
-def clean_directory(dir_path):
-    """Empty a directory safely"""
+def clean_directory(dir_path, exclude_files=None, max_age_days=7):
+    """Clean directory with age-based deletion"""
+    exclude_files = exclude_files or set()
+    now = time.time()
     for filename in os.listdir(dir_path):
+        if filename in exclude_files:
+            continue
         file_path = os.path.join(dir_path, filename)
         try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
+            file_age = (now - os.path.getmtime(file_path)) / (24 * 3600)
+            if file_age > max_age_days:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
         except Exception as e:
-            app.logger.error(f"Failed to delete {file_path}: {str(e)}")
+            app.logger.error(f"Cleanup failed for {file_path}: {str(e)}")
+
+def cleanup_old_templates(current_template):
+    """
+    Remove old template files while preserving the current active template
+    and default template.
+    """
+    try:
+        for filename in os.listdir(TEMPLATE_DIR):
+            file_path = os.path.join(TEMPLATE_DIR, filename)
+            # Skip if: current template, default template, or not an image file
+            if (filename == current_template or 
+                filename == 'default_template.png' or
+                not filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))):
+                continue
+                
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    app.logger.info(f"Cleaned up old template: {filename}")
+            except Exception as e:
+                app.logger.error(f"Failed to delete old template {filename}: {str(e)}")
+                
+    except Exception as e:
+        app.logger.error(f"Template cleanup failed: {str(e)}")
 
 def update_encrypted_qr_column(df):
     """Ensure all rows have valid encrypted QR data"""
@@ -176,23 +210,75 @@ def update_encrypted_qr_column(df):
     return df
 
 def generate_qrs(df):
-    existing_ids = set()
+    """Generate QR codes for all rows in dataframe, cleaning old ones"""
+    current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
+    
+    # Clean directory keeping only current IDs
+    clean_directory(QR_FOLDER, exclude_files=current_ids)
+    
+    # Generate new QR codes
     for _, row in df.iterrows():
         filename = f"{row['ID']}.png"
         file_path = os.path.join(QR_FOLDER, filename)
-        existing_ids.add(filename)
+        
         if not os.path.exists(file_path):
-            qr_img = qrcode.make(row['EncryptedQR'])
-            qr_img.save(file_path)
-    for f in os.listdir(QR_FOLDER):
-        if f not in existing_ids:
-            os.remove(os.path.join(QR_FOLDER, f))
+            try:
+                qr_img = qrcode.make(row['EncryptedQR'])
+                qr_img.save(file_path)
+                # Optimize image memory usage
+                with Image.open(file_path) as img:
+                    img.save(file_path, optimize=True, quality=85)
+            except Exception as e:
+                app.logger.error(f"Failed to generate QR for ID {row['ID']}: {str(e)}")
 
 def safe_float(val, default):
     try:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+def scheduled_cleanup():
+    """Regular cleanup of orphaned files"""
+    with app.app_context():
+        try:
+            config = load_active_config()
+            active_files = set()
+            
+            if config.get("active_dataset"):
+                try:
+                    df = pd.read_csv(os.path.join(DATASET_DIR, config["active_dataset"]))
+                    active_files.update(f"{row['ID']}.png" for _, row in df.iterrows())
+                except Exception as e:
+                    app.logger.error(f"Cleanup dataset read failed: {str(e)}")
+            
+            # Clean QR folder
+            clean_directory(QR_FOLDER, exclude_files=active_files)
+            
+            # Clean templates
+            if config.get("active_template"):
+                cleanup_old_templates(config["active_template"])
+                
+        except Exception as e:
+            app.logger.error(f"Scheduled cleanup failed: {str(e)}")
+
+# Initialize scheduler
+# Initialize scheduler
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=scheduled_cleanup, trigger="interval", hours=6)
+
+try:
+    scheduler.start()
+    app.logger.info("Scheduler started successfully")
+except Exception as e:
+    app.logger.error(f"Failed to start scheduler: {str(e)}")
+    # Depending on your application, you might want to:
+    # 1. Exit the application
+    # 2. Disable scheduled tasks
+    # 3. Fall back to manual cleanup
+    sys.exit(1)  # If this is critical functionality
+
+# Ensure scheduler shuts down cleanly
+atexit.register(lambda: scheduler.shutdown())
 
 @app.route("/activate", methods=["POST"])
 def activate():
@@ -266,9 +352,10 @@ def activate():
                     ).decode(), axis=1)
                     df.to_csv(dataset_path, index=False)
                 
+                # Clear ALL old QR codes before generating new ones
                 clean_directory(QR_FOLDER)
                 generate_qrs(df)
-                
+                        
             except pd.errors.EmptyDataError:
                 os.remove(dataset_path)
                 if is_first_run:
@@ -334,6 +421,9 @@ def activate():
                         "error": "Invalid image file",
                         "details": str(e)
                     }), 400
+                
+                # Clean up old templates after successful upload
+                cleanup_old_templates(template_filename)
                     
             except Exception as e:
                 if os.path.exists(template_path):
@@ -406,55 +496,79 @@ def index():
         success = request.args.get("success", "false") == "true"
         cache_buster = request.args.get("_", str(int(time.time())))
         
-        # First-run detection
-        if not config or not config.get("active_dataset") or not config.get("active_template"):
+        # First-run detection with more robust checks
+        if not config:
+            config = {"active_dataset": None, "active_template": None}
+            
+        required_files_exist = (
+            config.get("active_dataset") and 
+            config.get("active_template") and
+            os.path.exists(os.path.join(DATASET_DIR, config["active_dataset"])) and
+            os.path.exists(os.path.join(TEMPLATE_DIR, config["active_template"]))
+        )
+
+        if not required_files_exist:
             return redirect(url_for("first_run_setup"))
             
-        # Handle dataset and template files
+        # Get available files with error handling
         try:
-            dataset_files = sorted(os.listdir(DATASET_DIR), reverse=True)
-            template_files = sorted(os.listdir(TEMPLATE_DIR), reverse=True)
+            dataset_files = [f for f in sorted(os.listdir(DATASET_DIR), reverse=True) 
+                          if f.endswith('.csv')]
+            template_files = [f for f in sorted(os.listdir(TEMPLATE_DIR), reverse=True)
+                            if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         except FileNotFoundError:
-            dataset_files = []
-            template_files = []
             os.makedirs(DATASET_DIR, exist_ok=True)
             os.makedirs(TEMPLATE_DIR, exist_ok=True)
+            dataset_files = []
+            template_files = []
+
+        # Validate and repair config if needed
+        config_changed = False
         
-        # Verify active files still exist
-        if (config.get("active_dataset") and 
-            not os.path.exists(os.path.join(DATASET_DIR, config["active_dataset"]))):
+        # Check dataset
+        if not os.path.exists(os.path.join(DATASET_DIR, config["active_dataset"])):
             flash("Active dataset not found", "error")
             config["active_dataset"] = dataset_files[0] if dataset_files else None
+            config_changed = True
             
-        if (config.get("active_template") and 
-            not os.path.exists(os.path.join(TEMPLATE_DIR, config["active_template"]))):
+        # Check template
+        if not os.path.exists(os.path.join(TEMPLATE_DIR, config["active_template"])):
             flash("Active template not found", "error")
             config["active_template"] = template_files[0] if template_files else None
+            config_changed = True
             
-        # Save config if we made changes
-        if (not config.get("active_dataset") and dataset_files):
-            config["active_dataset"] = dataset_files[0]
-        if (not config.get("active_template") and template_files):
-            config["active_template"] = template_files[0]
-            
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(config, f)
-            
-        # If we still don't have both required, go to setup
+        # Save config if changed
+        if config_changed:
+            try:
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(config, f)
+            except Exception as e:
+                app.logger.error(f"Failed to save config: {str(e)}")
+                flash("Failed to save configuration", "error")
+
+        # Final verification before rendering
         if not config.get("active_dataset") or not config.get("active_template"):
             return redirect(url_for("first_run_setup"))
             
-        # Process active dataset
-        dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
+        # Load dataset with error handling
         try:
+            dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
             df = pd.read_csv(dataset_path)
+            
+            # Validate required columns
+            required_columns = {'ID', 'Name', 'Position', 'Company'}
+            if not required_columns.issubset(df.columns):
+                flash("Dataset missing required columns", "error")
+                return redirect(url_for("first_run_setup"))
+                
             update_encrypted_qr_column(df)
             generate_qrs(df)
+            
         except Exception as e:
-            app.logger.error(f"Dataset load failed: {str(e)}", exc_info=True)
-            flash("Failed to load active dataset", "error")
+            app.logger.error(f"Dataset processing failed: {str(e)}")
+            flash("Failed to process dataset", "error")
             return redirect(url_for("first_run_setup"))
-        
+
         return render_template(
             "index.html",
             config=config,
@@ -466,9 +580,10 @@ def index():
             template_files=template_files,
             cache_buster=cache_buster
         )
+        
     except Exception as e:
-        app.logger.error(f"Index page failed: {str(e)}", exc_info=True)
-        return render_template("error.html", error=str(e)), 500
+        app.logger.error(f"Index route failed: {str(e)}", exc_info=True)
+        return render_template("error.html", error="System error - please try again"), 500
 
 @app.route("/download/<filename>")
 def download_qr(filename):

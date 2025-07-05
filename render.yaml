@@ -7,13 +7,11 @@ services:
       pip install --upgrade pip
       pip install -r requirements.txt
       mkdir -p data/{participant_list,id_templates,qr_codes}
-      # Initialize empty config if doesn't exist
       [ -f data/active_config.json ] || echo '{}' > data/active_config.json
-      # Ensure default template exists
       mkdir -p static/id_templates
       [ -f static/id_templates/default_template.png ] || touch static/id_templates/default_template.png
       touch data/.ready
-    startCommand: "gunicorn --workers 2 --threads 4 --timeout 120 app:app"
+    startCommand: "gunicorn --workers 1 --threads 4 --timeout 300 --worker-class gthread --bind :$PORT app:app"
     envVars:
       - key: SECRET_KEY
         generateValue: true
