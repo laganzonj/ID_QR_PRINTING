@@ -1,8 +1,10 @@
-from flask import Flask, render_template, send_from_directory, jsonify, request, redirect, url_for, send_file
+from flask import Flask, render_template, send_from_directory, jsonify, request, redirect, url_for, send_file, flash
 import pandas as pd
 import qrcode
 import os
-import re
+import shutil
+import random
+import string
 import json
 from difflib import SequenceMatcher
 from cryptography.fernet import Fernet
@@ -10,7 +12,6 @@ from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from werkzeug.utils import secure_filename
 import threading
-import webview
 import platform
 from tempfile import NamedTemporaryFile
 from reportlab.pdfgen import canvas
@@ -31,14 +32,14 @@ os.makedirs(DATA_DIR, exist_ok=True)  # Ensure it exists
 
 # Persistent storage paths (will be created on disk volume)
 QR_FOLDER = os.path.join(DATA_DIR, "qr_codes")
-DATASET_DIR = os.path.join(DATA_DIR, "participant_list")
-PERSISTENT_TEMPLATE_DIR = os.path.join(DATA_DIR, "id_templates")
+DATASET_DIR = os.path.join(DATA_DIR, "participant_list") 
+TEMPLATE_DIR = os.path.join(DATA_DIR, "id_templates")  
 CONFIG_PATH = os.path.join(DATA_DIR, "active_config.json")
 
 # For static assets (committed to Git)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-STATIC_TEMPLATES = os.path.join(STATIC_DIR, "id_templates")  # Default templates
-STATIC_QR_CODES = os.path.join(STATIC_DIR, "qr_codes")  # For reference/backup
+STATIC_TEMPLATES = os.path.join(STATIC_DIR, "id_templates")  
+STATIC_QR_CODES = os.path.join(STATIC_DIR, "qr_codes")  
 
 # Flask templates (for HTML files)
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
@@ -47,7 +48,7 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 required_dirs = [
     QR_FOLDER,
     DATASET_DIR, 
-    PERSISTENT_TEMPLATE_DIR,
+    TEMPLATE_DIR,  
     STATIC_TEMPLATES,
     STATIC_QR_CODES,
     TEMPLATES_DIR
@@ -80,13 +81,7 @@ def upload_status():
 
 def load_active_config():
     if not os.path.exists(CONFIG_PATH):
-        default_config = {
-            "active_dataset": "sample_employees_dataset.csv",
-            "active_template": "template1.png"
-        }
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(default_config, f)
-        return default_config
+        return {}  # Return empty dict for first run
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
 
@@ -119,6 +114,28 @@ def get_template_preview_url(template_filename):
         return url_for('static', filename=f'id_templates/{template_filename}')
     else:
         return url_for('static', filename='id_templates/default_template.png')
+
+@app.route("/first-run")
+def first_run_setup():
+    # Ensure all required directories exist
+    os.makedirs(DATASET_DIR, exist_ok=True)
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
+    os.makedirs(QR_FOLDER, exist_ok=True)
+    
+    # Get existing files
+    try:
+        dataset_files = sorted(os.listdir(DATASET_DIR), reverse=True)
+    except FileNotFoundError:
+        dataset_files = []
+    
+    try:
+        template_files = sorted(os.listdir(TEMPLATE_DIR), reverse=True)
+    except FileNotFoundError:
+        template_files = []
+    
+    return render_template("first_run.html",
+        dataset_files=dataset_files,
+        template_files=template_files)
 
 @app.route('/persistent_templates/<filename>')
 def serve_persistent_template(filename):
@@ -173,6 +190,9 @@ def safe_float(val, default):
 @app.route("/activate", methods=["POST"])
 def activate():
     try:
+        # Check if this is a first-run setup
+        is_first_run = request.form.get("triggeredBy") == "first_run"
+        
         # Ensure directories exist
         os.makedirs(DATASET_DIR, exist_ok=True)
         os.makedirs(TEMPLATE_DIR, exist_ok=True)
@@ -180,55 +200,56 @@ def activate():
 
         dataset_file = request.files.get("dataset_file")
         template_file = request.files.get("template_file")
+        existing_dataset = request.form.get("existing_dataset")
+        existing_template = request.form.get("existing_template")
         config = load_active_config()
         
-        # Process dataset file
-        if dataset_file and dataset_file.filename:
-            # Generate unique filename with timestamp and random string
+        # Process dataset selection
+        if existing_dataset:
+            # Use existing dataset if selected
+            config["active_dataset"] = existing_dataset
+        elif dataset_file and dataset_file.filename:
+            # Process new dataset upload
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
             dataset_filename = f"{int(time.time())}_{random_str}_{secure_filename(dataset_file.filename)}"
             dataset_path = os.path.join(DATASET_DIR, dataset_filename)
             
-            # Save file and update config
             dataset_file.save(dataset_path)
             config["active_dataset"] = dataset_filename
             
-            # Validate and process dataset
             try:
                 df = pd.read_csv(dataset_path)
                 required_cols = {'ID', 'Name', 'Position', 'Company'}
                 if not required_cols.issubset(df.columns):
-                    # Clean up invalid file
-                    if os.path.exists(dataset_path):
-                        os.remove(dataset_path)
+                    os.remove(dataset_path)
+                    if is_first_run:
+                        flash("Dataset missing required columns: ID, Name, Position, Company", "error")
+                        return redirect(url_for("first_run_setup"))
                     return jsonify({
                         "error": "Dataset missing required columns",
                         "details": "Required columns: ID, Name, Position, Company",
                         "received_columns": list(df.columns)
                     }), 400
                 
-                # Data validation
                 if df['ID'].duplicated().any():
                     os.remove(dataset_path)
+                    if is_first_run:
+                        flash("Duplicate IDs found in dataset - each ID must be unique", "error")
+                        return redirect(url_for("first_run_setup"))
                     return jsonify({
                         "error": "Duplicate IDs found in dataset",
                         "details": "Each ID must be unique"
                     }), 400
                 
-                # Add encrypted QR if missing or regenerate if data changed
-                regenerate_qr = False
-                if 'EncryptedQR' not in df.columns:
-                    regenerate_qr = True
-                else:
-                    # Check if any core data has changed
-                    sample_row = df.iloc[0]
+                regenerate_qr = 'EncryptedQR' not in df.columns
+                if not regenerate_qr:
                     try:
+                        sample_row = df.iloc[0]
                         decrypted = fernet.decrypt(sample_row['EncryptedQR'].encode()).decode()
-                        if not all(
+                        regenerate_qr = not all(
                             f"{k}={v}" in decrypted 
                             for k, v in sample_row[['ID', 'Name', 'Position', 'Company']].items()
-                        ):
-                            regenerate_qr = True
+                        )
                     except:
                         regenerate_qr = True
                 
@@ -238,56 +259,70 @@ def activate():
                     ).decode(), axis=1)
                     df.to_csv(dataset_path, index=False)
                 
-                # Clean QR folder and regenerate all QR codes
                 clean_directory(QR_FOLDER)
                 generate_qrs(df)
                 
             except pd.errors.EmptyDataError:
                 os.remove(dataset_path)
+                if is_first_run:
+                    flash("The dataset file is empty", "error")
+                    return redirect(url_for("first_run_setup"))
                 return jsonify({"error": "Dataset file is empty"}), 400
             except Exception as e:
                 if os.path.exists(dataset_path):
                     os.remove(dataset_path)
                 app.logger.error(f"Dataset processing failed: {str(e)}", exc_info=True)
+                if is_first_run:
+                    flash(f"Dataset processing failed: {str(e)}", "error")
+                    return redirect(url_for("first_run_setup"))
                 return jsonify({
                     "error": "Dataset processing failed",
                     "details": str(e)
                 }), 400
 
-        # Process template file
-        if template_file and template_file.filename:
-            # Generate unique filename with timestamp and random string
+        # Process template selection
+        if existing_template:
+            # Use existing template if selected
+            config["active_template"] = existing_template
+        elif template_file and template_file.filename:
+            # Process new template upload
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
             template_filename = f"{int(time.time())}_{random_str}_{secure_filename(template_file.filename)}"
             template_path = os.path.join(TEMPLATE_DIR, template_filename)
             
             try:
-                # Verify it's an image file
                 allowed_extensions = {'.png', '.jpg', '.jpeg', '.webp'}
                 file_ext = os.path.splitext(template_file.filename.lower())[1]
                 if file_ext not in allowed_extensions:
+                    if is_first_run:
+                        flash(f"Invalid template file type. Allowed types: {', '.join(allowed_extensions)}", "error")
+                        return redirect(url_for("first_run_setup"))
                     return jsonify({
                         "error": "Invalid template file type",
                         "details": f"Allowed types: {', '.join(allowed_extensions)}"
                     }), 400
                 
-                # Save file and update config
                 template_file.save(template_path)
                 config["active_template"] = template_filename
                 
-                # Verify the image is valid and dimensions
                 try:
                     with Image.open(template_path) as img:
                         img.verify()
                         width, height = img.size
                         if width < 500 or height < 500:
                             os.remove(template_path)
+                            if is_first_run:
+                                flash("Image dimensions too small (minimum 500x500 pixels)", "error")
+                                return redirect(url_for("first_run_setup"))
                             return jsonify({
                                 "error": "Image dimensions too small",
                                 "details": "Minimum size: 500x500 pixels"
                             }), 400
                 except Exception as e:
                     os.remove(template_path)
+                    if is_first_run:
+                        flash(f"Invalid image file: {str(e)}", "error")
+                        return redirect(url_for("first_run_setup"))
                     return jsonify({
                         "error": "Invalid image file",
                         "details": str(e)
@@ -297,14 +332,29 @@ def activate():
                 if os.path.exists(template_path):
                     os.remove(template_path)
                 app.logger.error(f"Template processing failed: {str(e)}", exc_info=True)
+                if is_first_run:
+                    flash(f"Template upload failed: {str(e)}", "error")
+                    return redirect(url_for("first_run_setup"))
                 return jsonify({
                     "error": "Template upload failed",
                     "details": str(e)
                 }), 400
 
+        # Validate we have both dataset and template
+        if not config.get("active_dataset"):
+            if is_first_run:
+                flash("Please select or upload a dataset", "error")
+                return redirect(url_for("first_run_setup"))
+            return jsonify({"error": "No dataset selected or uploaded"}), 400
+            
+        if not config.get("active_template"):
+            if is_first_run:
+                flash("Please select or upload a template", "error")
+                return redirect(url_for("first_run_setup"))
+            return jsonify({"error": "No template selected or uploaded"}), 400
+
         # Save configuration with backup
         try:
-            # Create backup of current config
             if os.path.exists(CONFIG_PATH):
                 backup_path = f"{CONFIG_PATH}.bak.{int(time.time())}"
                 shutil.copy2(CONFIG_PATH, backup_path)
@@ -313,14 +363,17 @@ def activate():
                 json.dump(config, f, indent=2)
         except Exception as e:
             app.logger.error(f"Config save failed: {str(e)}", exc_info=True)
+            if is_first_run:
+                flash("Failed to save configuration", "error")
+                return redirect(url_for("first_run_setup"))
             return jsonify({
                 "error": "Failed to save configuration",
                 "details": str(e)
             }), 500
 
         # Return appropriate response
-        if request.form.get("triggeredBy") == "manual":
-            return redirect(url_for("index", success="true", _="{}".format(int(time.time()))))
+        if is_first_run or request.form.get("triggeredBy") == "manual":
+            return redirect(url_for("index", success="true", _=int(time.time())))
         return jsonify({
             "success": True,
             "message": "Activation successful",
@@ -331,6 +384,9 @@ def activate():
 
     except Exception as e:
         app.logger.error(f"Activation failed: {str(e)}", exc_info=True)
+        if request.form.get("triggeredBy") == "first_run":
+            flash(f"Setup failed: {str(e)}", "error")
+            return redirect(url_for("first_run_setup"))
         return jsonify({
             "error": "Internal server error during activation",
             "details": str(e)
@@ -343,29 +399,58 @@ def index():
         success = request.args.get("success", "false") == "true"
         cache_buster = request.args.get("_", str(int(time.time())))
         
-        # Handle dataset
-        dataset_files = sorted(os.listdir(DATASET_DIR), reverse=True)
-        template_files = sorted(os.listdir(TEMPLATE_DIR), reverse=True)
+        # First-run detection
+        if not config or not config.get("active_dataset") or not config.get("active_template"):
+            return redirect(url_for("first_run_setup"))
+            
+        # Handle dataset and template files
+        try:
+            dataset_files = sorted(os.listdir(DATASET_DIR), reverse=True)
+            template_files = sorted(os.listdir(TEMPLATE_DIR), reverse=True)
+        except FileNotFoundError:
+            dataset_files = []
+            template_files = []
+            os.makedirs(DATASET_DIR, exist_ok=True)
+            os.makedirs(TEMPLATE_DIR, exist_ok=True)
         
-        if not config.get("active_dataset") and dataset_files:
+        # Verify active files still exist
+        if (config.get("active_dataset") and 
+            not os.path.exists(os.path.join(DATASET_DIR, config["active_dataset"]))):
+            flash("Active dataset not found", "error")
+            config["active_dataset"] = dataset_files[0] if dataset_files else None
+            
+        if (config.get("active_template") and 
+            not os.path.exists(os.path.join(TEMPLATE_DIR, config["active_template"]))):
+            flash("Active template not found", "error")
+            config["active_template"] = template_files[0] if template_files else None
+            
+        # Save config if we made changes
+        if (not config.get("active_dataset") and dataset_files):
             config["active_dataset"] = dataset_files[0]
-        
-        if not config.get("active_template") and template_files:
+        if (not config.get("active_template") and template_files):
             config["active_template"] = template_files[0]
             
-        if config.get("active_dataset"):
-            dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-            try:
-                df = pd.read_csv(dataset_path)
-                update_encrypted_qr_column(df)
-                generate_qrs(df)
-            except Exception as e:
-                app.logger.error(f"Dataset load failed: {str(e)}", exc_info=True)
-                flash("Failed to load active dataset", "error")
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(config, f)
+            
+        # If we still don't have both required, go to setup
+        if not config.get("active_dataset") or not config.get("active_template"):
+            return redirect(url_for("first_run_setup"))
+            
+        # Process active dataset
+        dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
+        try:
+            df = pd.read_csv(dataset_path)
+            update_encrypted_qr_column(df)
+            generate_qrs(df)
+        except Exception as e:
+            app.logger.error(f"Dataset load failed: {str(e)}", exc_info=True)
+            flash("Failed to load active dataset", "error")
+            return redirect(url_for("first_run_setup"))
         
         return render_template(
             "index.html",
-            files=sorted(os.listdir(QR_FOLDER), reverse=True),
+            files=sorted(os.listdir(QR_FOLDER), reverse=True) if os.path.exists(QR_FOLDER) else [],
             success=success,
             active_template=config.get("active_template"),
             active_dataset=config.get("active_dataset"),
