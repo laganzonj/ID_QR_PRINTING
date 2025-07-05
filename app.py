@@ -848,6 +848,7 @@ def print_id():
 
 @app.route("/print_image_direct", methods=["POST"])
 def print_image_direct():
+    import base64
     try:
         data = request.get_json()
         image_data = data.get("image_base64", "")
