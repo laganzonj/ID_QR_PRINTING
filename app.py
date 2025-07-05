@@ -400,10 +400,3 @@ def show_preview(session_id):
     h = request.args.get("h", "11.69")
     return render_template("preview.html", session_id=session_id, w=w, h=h)
 
-import os
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(debug=False, host="0.0.0.0", port=port)
-
-
