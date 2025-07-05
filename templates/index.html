@@ -156,7 +156,7 @@
                 >
                   <img
                     id="id-template-preview"
-                    src="{{ url_for('static', filename='id_templates/' + active_template) }}?v={{ config['active_dataset'] }}"
+                    src="{{ get_template_preview_url(active_template) }}?v={{ config['active_dataset'] }}"
                     alt="ID Template Preview"
                     style="
                       width: 100%;
@@ -167,6 +167,7 @@
                       z-index: 1;
                       position: relative;
                     "
+                    onerror="this.onerror=null;this.src='{{ url_for('static', filename='id_templates/default_template.png') }}'"
                   />
                   <div
                     class="position-absolute id-overlay"
@@ -590,6 +591,10 @@
         document.getElementById("current-template").textContent = templateFile.name;
       });
 
+      document.getElementById('id-template-preview').addEventListener('error', function() {
+        this.src = '/static/id_templates/default_template.png?' + Date.now();
+      });
+
       // Set dynamic background from template image
       const templateImg = document.getElementById("id-template-preview");
       templateImg.onload = function() {
@@ -602,6 +607,30 @@
         const color = `rgb(${r}, ${g}, ${b})`;
         document.getElementById("paperBoundary").style.background = `radial-gradient(circle, ${color}, #000)`;
       };
+      // Add this to your index.html
+      async function waitForUploadReady() {
+          while (true) {
+              const response = await fetch('/upload_status');
+              const status = await response.json();
+              if (status.ready) return true;
+              await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+      }
+
+      // Modify your upload handler
+      async function handleUpload() {
+          const uploadBtn = document.getElementById('uploadBtn');
+          uploadBtn.disabled = true;
+          uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking system...';
+          
+          await waitForUploadReady();
+          
+          uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload Files';
+          uploadBtn.disabled = false;
+          
+          // Proceed with normal upload flow
+          document.getElementById('fileInput').click();
+      }
     </script>
   </body>
 </html>

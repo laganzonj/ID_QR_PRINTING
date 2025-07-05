@@ -18,25 +18,44 @@ from reportlab.lib.utils import ImageReader
 import subprocess
 import traceback
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
 
-QR_FOLDER = os.path.join(BASE_DIR, "static", "qr_codes")
-DATASET_DIR = os.path.join(BASE_DIR, "participant_list")
-TEMPLATE_DIR = os.path.join(BASE_DIR, "static", "id_templates")
-CONFIG_PATH = os.path.join(BASE_DIR, "active_config.json")
+# For persistent storage (Render disk volume)
+DATA_DIR = os.path.join(BASE_DIR, "data")  # New parent directory for all persistent data
+QR_FOLDER = os.path.join(DATA_DIR, "qr_codes")
+DATASET_DIR = os.path.join(DATA_DIR, "participant_list") 
+TEMPLATE_DIR = os.path.join(DATA_DIR, "id_templates")
+CONFIG_PATH = os.path.join(DATA_DIR, "active_config.json")
 
-os.makedirs(QR_FOLDER, exist_ok=True)
-os.makedirs(DATASET_DIR, exist_ok=True)
-os.makedirs(TEMPLATE_DIR, exist_ok=True)
+# For static assets (committed to Git)
+STATIC_TEMPLATES = os.path.join(BASE_DIR, "static", "id_templates")  # Default templates
 
 app.secret_key = os.getenv('SECRET_KEY')
 
 with open("qr_key.key", "rb") as f:
     fernet = Fernet(f.read())
+
+
+def check_upload_availability():
+    """Check if persistent storage is ready for uploads"""
+    while not os.path.exists('/opt/render/project/src/data/.ready'):
+        time.sleep(1)
+
+# Run this check when app starts
+threading.Thread(target=check_upload_availability, daemon=True).start()
+
+@app.route("/upload_status")
+def upload_status():
+    return jsonify({
+        "ready": os.path.exists(os.path.join(DATA_DIR, ".ready")),
+        "message": "System ready for uploads" if os.path.exists(os.path.join(DATA_DIR, ".ready")) 
+    else "Initializing storage..."
+    })
 
 def load_active_config():
     if not os.path.exists(CONFIG_PATH):
@@ -55,14 +74,61 @@ def get_active_dataset():
     dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
     return pd.read_csv(dataset_path), config["active_template"]
 
+def get_template_path(filename):
+    # Check persistent storage first
+    persistent_path = os.path.join(TEMPLATE_DIR, filename)
+    if os.path.exists(persistent_path):
+        return persistent_path
+        
+    # Fall back to static files
+    static_path = os.path.join(STATIC_TEMPLATES, filename)
+    if os.path.exists(static_path):
+        return static_path
+        
+    raise FileNotFoundError(f"Template {filename} not found")
+
+def get_template_preview_url(template_filename):
+    """Returns URL for template from either persistent storage or static files"""
+    persistent_path = os.path.join(TEMPLATE_DIR, template_filename)
+    static_path = os.path.join(app.static_folder, 'id_templates', template_filename)
+    
+    if os.path.exists(persistent_path):
+        return url_for('serve_persistent_template', filename=template_filename)
+    elif os.path.exists(static_path):
+        return url_for('static', filename=f'id_templates/{template_filename}')
+    else:
+        return url_for('static', filename='id_templates/default_template.png')
+
+@app.route('/persistent_templates/<filename>')
+def serve_persistent_template(filename):
+    """Special route for serving templates from persistent storage"""
+    return send_from_directory(TEMPLATE_DIR, filename)
+
+def clean_directory(dir_path):
+    """Empty a directory safely"""
+    for filename in os.listdir(dir_path):
+        file_path = os.path.join(dir_path, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+        except Exception as e:
+            app.logger.error(f"Failed to delete {file_path}: {str(e)}")
+
 def update_encrypted_qr_column(df):
-    if 'EncryptedQR' not in df.columns:
-        df['EncryptedQR'] = df.apply(lambda row: fernet.encrypt(
-            f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
-        ).decode(), axis=1)
-        config = load_active_config()
-        dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-        df.to_csv(dataset_path, index=False)
+    """Ensure all rows have valid encrypted QR data"""
+    for index, row in df.iterrows():
+        try:
+            # Test if existing QR data is valid
+            if 'EncryptedQR' in df.columns:
+                fernet.decrypt(row['EncryptedQR'].encode()).decode()
+        except:
+            # Regenerate if invalid
+            df.at[index, 'EncryptedQR'] = fernet.encrypt(
+                f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
+            ).decode()
+    return df
 
 def generate_qrs(df):
     existing_ids = set()
@@ -85,57 +151,210 @@ def safe_float(val, default):
 
 @app.route("/activate", methods=["POST"])
 def activate():
-    import time
-    dataset_file = request.files.get("dataset_file")
-    template_file = request.files.get("template_file")
-    config = load_active_config()
-    timestamp = str(int(time.time()))
-    if dataset_file:
-        dataset_filename = timestamp + "_" + secure_filename(dataset_file.filename)
-        dataset_path = os.path.join(DATASET_DIR, dataset_filename)
-        dataset_file.save(dataset_path)
-        config["active_dataset"] = dataset_filename
-    else:
-        dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-    if template_file:
-        template_filename = timestamp + "_" + secure_filename(template_file.filename)
-        template_path = os.path.join(TEMPLATE_DIR, template_filename)
-        template_file.save(template_path)
-        config["active_template"] = template_filename
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f)
-    df = pd.read_csv(dataset_path)
-    required_cols = {'ID', 'Name', 'Position', 'Company'}
-    if not required_cols.issubset(df.columns):
-        return "Dataset is missing required columns: ID, Name, Position, Company", 400
-    if 'EncryptedQR' not in df.columns:
-        df['EncryptedQR'] = df.apply(lambda row: fernet.encrypt(
-            f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
-        ).decode(), axis=1)
-        df.to_csv(dataset_path, index=False)
-    if dataset_file:
-        for f in os.listdir(QR_FOLDER):
-            os.remove(os.path.join(QR_FOLDER, f))
-        generate_qrs(df)
-    if request.form.get("triggeredBy") == "manual":
-        return redirect(url_for("index", success="true"))
-    return redirect(url_for("index"))
+    try:
+        # Ensure directories exist
+        os.makedirs(DATASET_DIR, exist_ok=True)
+        os.makedirs(TEMPLATE_DIR, exist_ok=True)
+        os.makedirs(QR_FOLDER, exist_ok=True)
+
+        dataset_file = request.files.get("dataset_file")
+        template_file = request.files.get("template_file")
+        config = load_active_config()
+        
+        # Process dataset file
+        if dataset_file and dataset_file.filename:
+            # Generate unique filename with timestamp and random string
+            random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+            dataset_filename = f"{int(time.time())}_{random_str}_{secure_filename(dataset_file.filename)}"
+            dataset_path = os.path.join(DATASET_DIR, dataset_filename)
+            
+            # Save file and update config
+            dataset_file.save(dataset_path)
+            config["active_dataset"] = dataset_filename
+            
+            # Validate and process dataset
+            try:
+                df = pd.read_csv(dataset_path)
+                required_cols = {'ID', 'Name', 'Position', 'Company'}
+                if not required_cols.issubset(df.columns):
+                    # Clean up invalid file
+                    if os.path.exists(dataset_path):
+                        os.remove(dataset_path)
+                    return jsonify({
+                        "error": "Dataset missing required columns",
+                        "details": "Required columns: ID, Name, Position, Company",
+                        "received_columns": list(df.columns)
+                    }), 400
+                
+                # Data validation
+                if df['ID'].duplicated().any():
+                    os.remove(dataset_path)
+                    return jsonify({
+                        "error": "Duplicate IDs found in dataset",
+                        "details": "Each ID must be unique"
+                    }), 400
+                
+                # Add encrypted QR if missing or regenerate if data changed
+                regenerate_qr = False
+                if 'EncryptedQR' not in df.columns:
+                    regenerate_qr = True
+                else:
+                    # Check if any core data has changed
+                    sample_row = df.iloc[0]
+                    try:
+                        decrypted = fernet.decrypt(sample_row['EncryptedQR'].encode()).decode()
+                        if not all(
+                            f"{k}={v}" in decrypted 
+                            for k, v in sample_row[['ID', 'Name', 'Position', 'Company']].items()
+                        ):
+                            regenerate_qr = True
+                    except:
+                        regenerate_qr = True
+                
+                if regenerate_qr:
+                    df['EncryptedQR'] = df.apply(lambda row: fernet.encrypt(
+                        f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
+                    ).decode(), axis=1)
+                    df.to_csv(dataset_path, index=False)
+                
+                # Clean QR folder and regenerate all QR codes
+                clean_directory(QR_FOLDER)
+                generate_qrs(df)
+                
+            except pd.errors.EmptyDataError:
+                os.remove(dataset_path)
+                return jsonify({"error": "Dataset file is empty"}), 400
+            except Exception as e:
+                if os.path.exists(dataset_path):
+                    os.remove(dataset_path)
+                app.logger.error(f"Dataset processing failed: {str(e)}", exc_info=True)
+                return jsonify({
+                    "error": "Dataset processing failed",
+                    "details": str(e)
+                }), 400
+
+        # Process template file
+        if template_file and template_file.filename:
+            # Generate unique filename with timestamp and random string
+            random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+            template_filename = f"{int(time.time())}_{random_str}_{secure_filename(template_file.filename)}"
+            template_path = os.path.join(TEMPLATE_DIR, template_filename)
+            
+            try:
+                # Verify it's an image file
+                allowed_extensions = {'.png', '.jpg', '.jpeg', '.webp'}
+                file_ext = os.path.splitext(template_file.filename.lower())[1]
+                if file_ext not in allowed_extensions:
+                    return jsonify({
+                        "error": "Invalid template file type",
+                        "details": f"Allowed types: {', '.join(allowed_extensions)}"
+                    }), 400
+                
+                # Save file and update config
+                template_file.save(template_path)
+                config["active_template"] = template_filename
+                
+                # Verify the image is valid and dimensions
+                try:
+                    with Image.open(template_path) as img:
+                        img.verify()
+                        width, height = img.size
+                        if width < 500 or height < 500:
+                            os.remove(template_path)
+                            return jsonify({
+                                "error": "Image dimensions too small",
+                                "details": "Minimum size: 500x500 pixels"
+                            }), 400
+                except Exception as e:
+                    os.remove(template_path)
+                    return jsonify({
+                        "error": "Invalid image file",
+                        "details": str(e)
+                    }), 400
+                    
+            except Exception as e:
+                if os.path.exists(template_path):
+                    os.remove(template_path)
+                app.logger.error(f"Template processing failed: {str(e)}", exc_info=True)
+                return jsonify({
+                    "error": "Template upload failed",
+                    "details": str(e)
+                }), 400
+
+        # Save configuration with backup
+        try:
+            # Create backup of current config
+            if os.path.exists(CONFIG_PATH):
+                backup_path = f"{CONFIG_PATH}.bak.{int(time.time())}"
+                shutil.copy2(CONFIG_PATH, backup_path)
+            
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            app.logger.error(f"Config save failed: {str(e)}", exc_info=True)
+            return jsonify({
+                "error": "Failed to save configuration",
+                "details": str(e)
+            }), 500
+
+        # Return appropriate response
+        if request.form.get("triggeredBy") == "manual":
+            return redirect(url_for("index", success="true", _="{}".format(int(time.time()))))
+        return jsonify({
+            "success": True,
+            "message": "Activation successful",
+            "active_template": config.get("active_template"),
+            "active_dataset": config.get("active_dataset"),
+            "timestamp": int(time.time())
+        })
+
+    except Exception as e:
+        app.logger.error(f"Activation failed: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error during activation",
+            "details": str(e)
+        }), 500
 
 @app.route("/")
 def index():
-    config = load_active_config()
-    dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-    df = pd.read_csv(dataset_path)
-    update_encrypted_qr_column(df)
-    generate_qrs(df)
-    success = request.args.get("success", "false") == "true"
-    return render_template(
-        "index.html",
-        files=os.listdir(QR_FOLDER),
-        success=success,
-        active_template=config["active_template"],
-        active_dataset=config["active_dataset"]
-    )
+    try:
+        config = load_active_config()
+        success = request.args.get("success", "false") == "true"
+        cache_buster = request.args.get("_", str(int(time.time())))
+        
+        # Handle dataset
+        dataset_files = sorted(os.listdir(DATASET_DIR), reverse=True)
+        template_files = sorted(os.listdir(TEMPLATE_DIR), reverse=True)
+        
+        if not config.get("active_dataset") and dataset_files:
+            config["active_dataset"] = dataset_files[0]
+        
+        if not config.get("active_template") and template_files:
+            config["active_template"] = template_files[0]
+            
+        if config.get("active_dataset"):
+            dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
+            try:
+                df = pd.read_csv(dataset_path)
+                update_encrypted_qr_column(df)
+                generate_qrs(df)
+            except Exception as e:
+                app.logger.error(f"Dataset load failed: {str(e)}", exc_info=True)
+                flash("Failed to load active dataset", "error")
+        
+        return render_template(
+            "index.html",
+            files=sorted(os.listdir(QR_FOLDER), reverse=True),
+            success=success,
+            active_template=config.get("active_template"),
+            active_dataset=config.get("active_dataset"),
+            dataset_files=dataset_files,
+            template_files=template_files,
+            cache_buster=cache_buster
+        )
+    except Exception as e:
+        app.logger.error(f"Index page failed: {str(e)}", exc_info=True)
+        return render_template("error.html", error=str(e)), 500
 
 @app.route("/download/<filename>")
 def download_qr(filename):
@@ -399,4 +618,3 @@ def show_preview(session_id):
     w = request.args.get("w", "8.27")
     h = request.args.get("h", "11.69")
     return render_template("preview.html", session_id=session_id, w=w, h=h)
-

@@ -1,4 +1,5 @@
 # Secret files
+/data/
 .env
 qr_key.key
 active_config.json
@@ -9,3 +10,10 @@ __pycache__/
 *.env.local
 venv/
 .vscode/
+
+
+# Dynamic content (ADD THESE NEW LINES)
+/static/qr_codes/*
+/static/id_templates/*
+!static/qr_codes/.gitkeep
+!static/id_templates/.gitkeep
