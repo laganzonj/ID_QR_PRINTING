@@ -403,6 +403,7 @@ def show_preview(session_id):
 import os
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Render injects the port via env var
+    port = int(os.environ.get("PORT", 10000))
     app.run(debug=False, host="0.0.0.0", port=port)
+
 

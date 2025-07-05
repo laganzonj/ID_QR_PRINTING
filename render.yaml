@@ -4,6 +4,4 @@ services:
     runtime: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn app:app"
-    envVars:
-      - key: PORT
-        value: 10000
+    plan: free
