@@ -4,8 +4,8 @@ services:
     runtime: python
     pythonVersion: "3.10.8"
     buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
+      pip install --upgrade pip --no-cache-dir
+      pip install -r requirements.txt --no-cache-dir
       mkdir -p data/{participant_list,id_templates,qr_codes}
       [ -f data/active_config.json ] || echo '{}' > data/active_config.json
       mkdir -p static/id_templates
