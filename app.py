@@ -748,46 +748,53 @@ def print_id():
             underline_y = y + font.size + 2
             draw.line((x, underline_y, x + text_width, underline_y), fill="black", width=1)
 
-        # Save temporary files
-        with NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
-            img_path = tmp_img.name
-            id_template.save(img_path)
-            
-        with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-            pdf_path = tmp_pdf.name
-            c = canvas.Canvas(pdf_path, pagesize=(1013, 638))
-            c.drawImage(ImageReader(img_path), 0, 0, width=1013, height=638)
-            c.save()
+        # Generate unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"id_{employee_id}_{timestamp}.pdf"
+        output_path = os.path.join(DATA_DIR, output_filename)
+        
+        # Create PDF directly without temporary files
+        c = canvas.Canvas(output_path, pagesize=(1013, 638))
+        img_buffer = BytesIO()
+        id_template.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        c.drawImage(ImageReader(img_buffer), 0, 0, width=1013, height=638)
+        c.save()
 
-        # Try printing with different methods
-        try:
-            if platform.system() == "Windows":
-                os.startfile(pdf_path, "print")
-            else:
-                # Try both common print commands
+        # Attempt printing with comprehensive fallback
+        print_success = False
+        print_error = None
+        
+        if platform.system() == "Windows":
+            try:
+                os.startfile(output_path, "print")
+                print_success = True
+            except Exception as e:
+                print_error = str(e)
+        else:
+            # Try all possible print commands
+            for cmd in ["lp", "lpr", "lpadmin"]:
                 try:
-                    subprocess.run(["lpr", pdf_path], check=True)
-                except FileNotFoundError:
-                    subprocess.run(["lp", pdf_path], check=True)
-        except Exception as e:
-            # If printing fails, save the file and return its path
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = os.path.join(DATA_DIR, f"id_to_print_{timestamp}.pdf")
-            shutil.copy2(pdf_path, save_path)
+                    subprocess.run([cmd, output_path], check=True, timeout=10)
+                    print_success = True
+                    break
+                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                    print_error = str(e)
+                    continue
+
+        if not print_success:
             return {
                 "success": False,
-                "error": f"Failed to print: {str(e)}",
-                "saved_path": save_path
+                "error": f"Printing failed: {print_error}",
+                "download_url": url_for('download_file', filename=output_filename, _external=True),
+                "message": "Document saved and available for download"
             }, 500
-        finally:
-            # Clean up temporary files
-            try:
-                os.unlink(img_path)
-                os.unlink(pdf_path)
-            except:
-                pass
 
-        return {"success": True, "message": f"Print job sent for ID: {employee_id}"}
+        return {
+            "success": True,
+            "message": f"Print job sent for ID: {employee_id}",
+            "download_url": url_for('download_file', filename=output_filename, _external=True)
+        }
         
     except Exception as e:
         app.logger.error(f"Printing failed: {str(e)}", exc_info=True)
@@ -806,98 +813,82 @@ def print_image_direct():
         if not image_data.startswith("data:image/png;base64,"):
             return {"error": "Invalid image data format"}, 400
 
-        import base64
-        import io
-        import uuid
-        from tempfile import NamedTemporaryFile
-        from PIL import Image
+        # Generate unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"print_{timestamp}.png"
+        output_path = os.path.join(DATA_DIR, output_filename)
 
+        # Process image
+        base64_data = image_data.split(",")[1]
+        img_bytes = base64.b64decode(base64_data)
+        img = Image.open(BytesIO(img_bytes)).convert("RGB")
+        
+        # Calculate dimensions
         dpi = 300
-
         paper_sizes = {
-            "a4": (8.27, 11.69),
-            "letter": (8.5, 11),
-            "legal": (8.5, 14),
-            "a3": (11.7, 16.5),
-            "a5": (5.8, 8.3),
-            "a6": (4.1, 5.8),
-            "a7": (2.9, 3.9),
-            "b5": (7.2, 10.1),
-            "b4": (9.8, 13.9),
-            "4x6": (4, 6),
-            "5x7": (5, 7),
-            "5x8": (5, 8),
-            "9x13": (3.5, 5)
+            "a4": (8.27, 11.69), "letter": (8.5, 11), "legal": (8.5, 14),
+            "a3": (11.7, 16.5), "a5": (5.8, 8.3), "a6": (4.1, 5.8),
+            "a7": (2.9, 3.9), "b5": (7.2, 10.1), "b4": (9.8, 13.9),
+            "4x6": (4, 6), "5x7": (5, 7), "5x8": (5, 8), "9x13": (3.5, 5)
         }
-
+        
         if paper_size.lower() != "custom":
             custom_width, custom_height = paper_sizes.get(paper_size.lower(), (3.375, 2.125))
 
-        # Final paper pixel dimensions
-        paper_width_px = int(custom_width * dpi)
-        paper_height_px = int(custom_height * dpi)
-
-        # Decode and open image
-        base64_data = image_data.split(",")[1]
-        img_bytes = base64.b64decode(base64_data)
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-        # Scale image to fill the entire paper size (stretch)
-        resized_img = img.resize((paper_width_px, paper_height_px), Image.LANCZOS)
-
-        from flask import jsonify, url_for
+        # Scale and save image
+        img.resize((int(custom_width * dpi), int(custom_height * dpi)), Image.LANCZOS).save(output_path, dpi=(dpi, dpi))
 
         if redirect_to_preview:
-            # Save resized image to static folder
-            session_id = str(uuid.uuid4())
-            file_path = f"static/preview_{session_id}.png"
-            resized_img.save(file_path, dpi=(dpi, dpi))
             return jsonify({
                 "success": True,
-                "preview_url": url_for('show_preview', session_id=session_id, w=custom_width, h=custom_height)
+                "preview_url": url_for('show_preview', session_id=timestamp, w=custom_width, h=custom_height)
             })
 
-        # Save for direct printing
-        with NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
-            resized_img.save(tmp_img.name, dpi=(dpi, dpi))
-            tmp_img_path = tmp_img.name
-
-        import platform
-        import subprocess
-        try:
-            if platform.system() == "Windows":
-                subprocess.run(["mspaint", "/pt", tmp_img_path], check=True)
-            elif platform.system() == "Darwin":
-                subprocess.run(["lp", tmp_img_path], check=True)
-            else:
-                # Try both common print commands
+        # Attempt printing
+        print_success = False
+        print_error = None
+        
+        if platform.system() == "Windows":
+            try:
+                subprocess.run(["mspaint", "/pt", output_path], check=True, timeout=10)
+                print_success = True
+            except Exception as e:
+                print_error = str(e)
+        else:
+            for cmd in ["lp", "lpr", "lpadmin"]:
                 try:
-                    subprocess.run(["lpr", tmp_img_path], check=True)
-                except FileNotFoundError:
-                    subprocess.run(["lp", tmp_img_path], check=True)
-        except subprocess.CalledProcessError as e:
-            # If printing fails, save the file instead
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = os.path.join(DATA_DIR, f"print_{timestamp}.png")
-            shutil.copy2(tmp_img_path, save_path)
+                    subprocess.run([cmd, output_path], check=True, timeout=10)
+                    print_success = True
+                    break
+                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                    print_error = str(e)
+                    continue
+
+        if not print_success:
             return {
                 "success": False,
-                "error": f"Print command failed: {str(e)}",
-                "saved_path": save_path
+                "error": f"Printing failed: {print_error}",
+                "download_url": url_for('download_file', filename=output_filename, _external=True),
+                "message": "Document saved and available for download"
             }
-        finally:
-            try:
-                os.unlink(tmp_img_path)
-            except:
-                pass
 
-        return {"success": True, "message": "Image sent to printer"}
+        return {
+            "success": True,
+            "message": "Image sent to printer",
+            "download_url": url_for('download_file', filename=output_filename, _external=True)
+        }
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        app.logger.error(f"Direct print failed: {str(e)}", exc_info=True)
         return {"error": f"Unexpected error: {str(e)}"}, 500
 
+@app.route("/download/<filename>")
+def download_file(filename):
+    try:
+        return send_from_directory(DATA_DIR, filename, as_attachment=True)
+    except FileNotFoundError:
+        return {"error": "File not found"}, 404
+    
 @app.route("/show_preview/<session_id>")
 def show_preview(session_id):
     w = request.args.get("w", "8.27")
