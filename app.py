@@ -24,6 +24,7 @@ import time
 import atexit
 import atexit
 from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime
 
 load_dotenv()
 
@@ -720,42 +721,77 @@ def print_id():
     template_path = os.path.join(TEMPLATE_DIR, template_filename)
     if not os.path.exists(template_path):
         return {"error": "Template not found"}, 500
-    id_template = Image.open(template_path).convert("RGBA").resize((1013, 638))
-    qr_img = qrcode.make(emp['EncryptedQR']).resize((150, 150))
-    id_template.paste(qr_img, (400, 80))
-    draw = ImageDraw.Draw(id_template)
+    
     try:
-        font_path = os.path.join(BASE_DIR, "static", "fonts", "arial.ttf")
-        font = ImageFont.truetype(font_path, 24)
-    except:
-        font = ImageFont.load_default()
-    fields = [
-        ("Name", emp.get("Name", "N/A"), (50, 40)),
-        ("Position", emp.get("Position", "N/A"), (50, 80)),
-        ("Company", emp.get("Company", "N/A"), (50, 120)),
-    ]
-    for label, value, (x, y) in fields:
-        text = f"{label}: {value}"
-        draw.text((x, y), text, fill="black", font=font)
-        text_width = draw.textlength(text, font=font)
-        underline_y = y + font.size + 2
-        draw.line((x, underline_y, x + text_width, underline_y), fill="black", width=1)
-    with NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
-        id_template.save(tmp_img.name)
-        img_path = tmp_img.name
-    with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-        pdf_path = tmp_pdf.name
-        c = canvas.Canvas(pdf_path, pagesize=(1013, 638))
-        c.drawImage(ImageReader(img_path), 0, 0, width=1013, height=638)
-        c.save()
-    try:
-        if platform.system() == "Windows":
-            os.startfile(pdf_path, "print")
-        else:
-            subprocess.run(["lp", pdf_path])
+        # Generate the ID image
+        id_template = Image.open(template_path).convert("RGBA").resize((1013, 638))
+        qr_img = qrcode.make(emp['EncryptedQR']).resize((150, 150))
+        id_template.paste(qr_img, (400, 80))
+        draw = ImageDraw.Draw(id_template)
+        
+        try:
+            font_path = os.path.join(BASE_DIR, "static", "fonts", "arial.ttf")
+            font = ImageFont.truetype(font_path, 24)
+        except:
+            font = ImageFont.load_default()
+            
+        fields = [
+            ("Name", emp.get("Name", "N/A"), (50, 40)),
+            ("Position", emp.get("Position", "N/A"), (50, 80)),
+            ("Company", emp.get("Company", "N/A"), (50, 120)),
+        ]
+        
+        for label, value, (x, y) in fields:
+            text = f"{label}: {value}"
+            draw.text((x, y), text, fill="black", font=font)
+            text_width = draw.textlength(text, font=font)
+            underline_y = y + font.size + 2
+            draw.line((x, underline_y, x + text_width, underline_y), fill="black", width=1)
+
+        # Save temporary files
+        with NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
+            img_path = tmp_img.name
+            id_template.save(img_path)
+            
+        with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+            pdf_path = tmp_pdf.name
+            c = canvas.Canvas(pdf_path, pagesize=(1013, 638))
+            c.drawImage(ImageReader(img_path), 0, 0, width=1013, height=638)
+            c.save()
+
+        # Try printing with different methods
+        try:
+            if platform.system() == "Windows":
+                os.startfile(pdf_path, "print")
+            else:
+                # Try both common print commands
+                try:
+                    subprocess.run(["lpr", pdf_path], check=True)
+                except FileNotFoundError:
+                    subprocess.run(["lp", pdf_path], check=True)
+        except Exception as e:
+            # If printing fails, save the file and return its path
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = os.path.join(DATA_DIR, f"id_to_print_{timestamp}.pdf")
+            shutil.copy2(pdf_path, save_path)
+            return {
+                "success": False,
+                "error": f"Failed to print: {str(e)}",
+                "saved_path": save_path
+            }, 500
+        finally:
+            # Clean up temporary files
+            try:
+                os.unlink(img_path)
+                os.unlink(pdf_path)
+            except:
+                pass
+
+        return {"success": True, "message": f"Print job sent for ID: {employee_id}"}
+        
     except Exception as e:
-        return {"error": f"Failed to print: {str(e)}"}, 500
-    return {"success": True, "message": f"Print job sent for ID: {employee_id}"}
+        app.logger.error(f"Printing failed: {str(e)}", exc_info=True)
+        return {"error": f"Unexpected error during printing: {str(e)}"}, 500
 
 @app.route("/print_image_direct", methods=["POST"])
 def print_image_direct():
@@ -828,15 +864,35 @@ def print_image_direct():
 
         import platform
         import subprocess
-        if platform.system() == "Windows":
-            subprocess.run(["mspaint", "/pt", tmp_img_path], check=True)
-        elif platform.system() == "Darwin":
-            subprocess.run(["lp", tmp_img_path], check=True)
-        else:
-            subprocess.run(["lpr", tmp_img_path], check=True)
+        try:
+            if platform.system() == "Windows":
+                subprocess.run(["mspaint", "/pt", tmp_img_path], check=True)
+            elif platform.system() == "Darwin":
+                subprocess.run(["lp", tmp_img_path], check=True)
+            else:
+                # Try both common print commands
+                try:
+                    subprocess.run(["lpr", tmp_img_path], check=True)
+                except FileNotFoundError:
+                    subprocess.run(["lp", tmp_img_path], check=True)
+        except subprocess.CalledProcessError as e:
+            # If printing fails, save the file instead
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = os.path.join(DATA_DIR, f"print_{timestamp}.png")
+            shutil.copy2(tmp_img_path, save_path)
+            return {
+                "success": False,
+                "error": f"Print command failed: {str(e)}",
+                "saved_path": save_path
+            }
+        finally:
+            try:
+                os.unlink(tmp_img_path)
+            except:
+                pass
 
         return {"success": True, "message": "Image sent to printer"}
-
+        
     except Exception as e:
         import traceback
         traceback.print_exc()

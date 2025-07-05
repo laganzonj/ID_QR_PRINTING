@@ -508,7 +508,6 @@
                   paper_size: paperSize,
                   custom_width: customWidth,
                   custom_height: customHeight,
-                  // Add this flag to indicate we're coming from preview
                   from_preview: window.location.pathname.includes('show_preview')
               };
 
@@ -517,7 +516,6 @@
                   delete payload.custom_height;
               }
 
-              // Skip preview if we're already in preview or if preview is disabled
               if (showPreview && !payload.from_preview) {
                   payload.redirect = true;
               }
@@ -533,7 +531,6 @@
                       if (result.preview_url && !payload.from_preview) {
                           window.location.href = result.preview_url;
                       } else {
-                          // If coming from preview or preview disabled, just reset
                           setTimeout(() => resetSystem(), 1000);
                       }
                   } else {
