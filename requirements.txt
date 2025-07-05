@@ -13,8 +13,7 @@ reportlab==4.0.4   # PDF creation (alternative to html2canvas)
 
 ### Platform-Specific Printing
 pywin32==306; sys_platform == 'win32'            # Windows printing
-pycups==2.0.1; sys_platform == 'linux' and platform_machine == 'x86_64'         # Linux printing
-python-magic==0.4.27                             # File type validation
+pycups==2.0.1; sys_platform == 'linux' and platform_machine == 'x86_64'         # python-magic==0.4.27                             # File type validation
 
 ### Security & Validation
 cryptography==41.0.5  # Encryption for sensitive data
