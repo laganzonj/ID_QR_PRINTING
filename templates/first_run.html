@@ -35,6 +35,14 @@
       <p class="text-center mb-4 text-muted">
         Let's get started with the initial setup
       </p>
+      {% with messages = get_flashed_messages(with_categories=true) %} {% if
+      messages %} {% for category, message in messages %}
+      <div
+        class="alert alert-{{ 'danger' if category == 'error' else 'success' }} mb-4"
+      >
+        {{ message }}
+      </div>
+      {% endfor %} {% endif %} {% endwith %}
 
       <form
         id="setupForm"
@@ -328,6 +336,40 @@
           submitBtn.innerHTML =
             '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
           submitBtn.disabled = true;
+        });
+
+      function validateFileSize(input, maxSizeMB) {
+        if (input.files && input.files[0]) {
+          const fileSizeMB = input.files[0].size / (1024 * 1024);
+          if (fileSizeMB > maxSizeMB) {
+            alert(
+              `File size (${fileSizeMB.toFixed(
+                2
+              )}MB) exceeds maximum allowed size of ${maxSizeMB}MB`
+            );
+            input.value = "";
+            return false;
+          }
+        }
+        return true;
+      }
+
+      document
+        .getElementById("datasetInput")
+        .addEventListener("change", function (e) {
+          if (validateFileSize(this, 10)) {
+            // 10MB max
+            previewDatasetFile(this);
+          }
+        });
+
+      document
+        .getElementById("templateInput")
+        .addEventListener("change", function (e) {
+          if (validateFileSize(this, 5)) {
+            // 5MB max
+            previewTemplateFile(this);
+          }
         });
     </script>
   </body>

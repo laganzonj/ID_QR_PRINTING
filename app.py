@@ -227,9 +227,8 @@ def get_active_dataset() -> Tuple[pd.DataFrame, str]:
         chunks = pd.read_csv(dataset_path, chunksize=1000)
         df = pd.concat(chunks)
     else:
-        df_iter = pd.read_csv(dataset_path, chunksize=1000)
-        df = pd.concat(df_iter, ignore_index=True)
-
+        df = pd.read_csv(dataset_path)
+        
     return df, config["active_template"]
 
 def get_template_path(filename: str) -> str:
@@ -414,7 +413,7 @@ def upload_status() -> Tuple[dict, int]:
     return jsonify({
         "ready": os.path.exists(os.path.join(DATA_DIR, ".ready")),
         "message": "System ready for uploads" if os.path.exists(os.path.join(DATA_DIR, ".ready")) 
-                   else "Initializing storage..."
+                else "Initializing storage..."
     })
 
 @app.route("/first-run")
@@ -544,33 +543,53 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
     return json_response(False, message, status=400)
 
 def process_dataset(dataset_path: str) -> pd.DataFrame:
-    """Validate and process dataset file."""
+    """Validate and process dataset file with memory efficiency"""
     try:
-        df_iter = pd.read_csv(dataset_path, chunksize=1000)
-        df = pd.concat(df_iter, ignore_index=True)
-        required_cols = {'ID', 'Name', 'Position', 'Company'}
+        # First check file size
+        file_size = os.path.getsize(dataset_path) / (1024 * 1024)  # MB
+        if file_size > CONFIG['MAX_DATASET_SIZE_MB']:
+            os.remove(dataset_path)
+            raise ValueError(f"Dataset exceeds maximum size of {CONFIG['MAX_DATASET_SIZE_MB']}MB")
+
+        # Read in chunks with specified dtype to reduce memory
+        chunks = pd.read_csv(
+            dataset_path,
+            chunksize=1000,
+            dtype={
+                'ID': 'str',
+                'Name': 'str',
+                'Position': 'str',
+                'Company': 'str'
+            }
+        )
         
-        if not required_cols.issubset(df.columns):
+        # Process first chunk to validate columns
+        first_chunk = next(chunks)
+        required_cols = {'ID', 'Name', 'Position', 'Company'}
+        if not required_cols.issubset(first_chunk.columns):
             os.remove(dataset_path)
             raise ValueError("Dataset missing required columns: ID, Name, Position, Company")
-        
-        if df['ID'].duplicated().any():
-            os.remove(dataset_path)
-            raise ValueError("Duplicate IDs found in dataset")
-        
-        regenerate_qr = 'EncryptedQR' not in df.columns
-        if not regenerate_qr:
-            try:
-                sample_row = df.iloc[0]
-                decrypted = fernet.decrypt(sample_row['EncryptedQR'].encode()).decode()
-                regenerate_qr = not all(
-                    f"{k}={v}" in decrypted 
-                    for k, v in sample_row[['ID', 'Name', 'Position', 'Company']].items()
-                )
-            except:
-                regenerate_qr = True
-        
-        if regenerate_qr:
+
+        # Check for duplicate IDs
+        all_ids = set(first_chunk['ID'])
+        for chunk in chunks:
+            chunk_ids = set(chunk['ID'])
+            duplicates = all_ids & chunk_ids
+            if duplicates:
+                os.remove(dataset_path)
+                raise ValueError(f"Duplicate IDs found: {', '.join(duplicates)}")
+            all_ids.update(chunk_ids)
+
+        # Now read the entire file (should be safe after validation)
+        df = pd.read_csv(dataset_path, dtype={
+            'ID': 'str',
+            'Name': 'str',
+            'Position': 'str',
+            'Company': 'str'
+        })
+
+        # Check if we need to regenerate QR codes
+        if 'EncryptedQR' not in df.columns:
             df['EncryptedQR'] = df.apply(lambda row: fernet.encrypt(
                 f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
             ).decode(), axis=1)
@@ -648,8 +667,7 @@ def index():
         # Load dataset
         try:
             dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-            df_iter = pd.read_csv(dataset_path, chunksize=1000)
-            df = pd.concat(df_iter, ignore_index=True)
+            df = pd.read_csv(dataset_path)
 
             required_columns = {'ID', 'Name', 'Position', 'Company'}
             if not required_columns.issubset(df.columns):

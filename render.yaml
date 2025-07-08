@@ -21,6 +21,12 @@ services:
         value: /opt/render/project/src
       - key: FLASK_ENV
         value: production
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
     plan: starter
     autoDeploy: true
     healthCheckPath: /health
