@@ -357,16 +357,17 @@ def generate_single_qr(row: pd.Series, qr_folder: str) -> None:
         app.logger.error(f"Failed to generate QR for ID {row['ID']}: {str(e)}")
 
 def generate_qrs(df: pd.DataFrame) -> None:
-    """Generate QR codes with memory efficiency"""
+    """Generate QR codes with strict memory limits"""
     current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
     clean_directory(QR_FOLDER, exclude_files=current_ids)
     
-    # Process in batches
-    for i in range(0, len(df), 50):
-        batch = df.iloc[i:i+50]
+    # Process in very small batches
+    for i in range(0, len(df), 10):  # Only 10 at a time
+        batch = df.iloc[i:i+10]
         for _, row in batch.iterrows():
             generate_single_qr(row, QR_FOLDER)
-        gc.collect()  # Explicit garbage collection after each batch
+        gc.collect()  # Force garbage collection
+        time.sleep(0.1)  # Brief pause to allow memory recovery
 
 # --------------------------
 # Scheduled Tasks
@@ -455,7 +456,7 @@ def serve_persistent_template(filename: str):
 
 @app.route("/activate", methods=["POST"])
 def activate() -> Union[Tuple[dict, int], redirect]:
-    """Activate new configuration."""
+    """Activate new configuration with memory optimizations for Render starter plan."""
     try:
         is_first_run = request.form.get("triggeredBy") == "first_run"
         os.makedirs(DATASET_DIR, exist_ok=True)
@@ -468,7 +469,7 @@ def activate() -> Union[Tuple[dict, int], redirect]:
         existing_template = request.form.get("existing_template")
         config = load_active_config()
         
-        # Process dataset
+        # Process dataset with memory checks
         if existing_dataset:
             config["active_dataset"] = existing_dataset
         elif dataset_file and dataset_file.filename:
@@ -478,20 +479,57 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                     is_first_run
                 )
                 
+            # Check memory before processing
+            if not check_memory_available(100):  # Need at least 100MB free
+                return handle_activation_error(
+                    "System memory low. Try a smaller dataset or wait a moment.",
+                    is_first_run
+                )
+                
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
             dataset_filename = f"{int(time.time())}_{random_str}_{secure_filename(dataset_file.filename)}"
             dataset_path = os.path.join(DATASET_DIR, dataset_filename)
             
             try:
+                # Save file first
                 dataset_file.save(dataset_path)
+                
+                # Check file size (2MB max for starter plan)
+                file_size = os.path.getsize(dataset_path) / (1024 * 1024)
+                if file_size > 2:
+                    os.remove(dataset_path)
+                    return handle_activation_error(
+                        "Dataset exceeds 2MB limit for starter plan",
+                        is_first_run
+                    )
+                
+                # Process in memory-efficient way
                 df = process_dataset(dataset_path)
                 config["active_dataset"] = dataset_filename
+                
+                # Clean QR folder before generation
                 clean_directory(QR_FOLDER)
+                
+                # Generate QR codes in small batches
                 generate_qrs(df)
+                
+                # Explicit cleanup
+                del df
+                gc.collect()
+                
+            except MemoryError:
+                if os.path.exists(dataset_path):
+                    os.remove(dataset_path)
+                return handle_activation_error(
+                    "Ran out of memory processing dataset. Try a smaller file.",
+                    is_first_run
+                )
             except Exception as e:
+                if os.path.exists(dataset_path):
+                    os.remove(dataset_path)
                 return handle_activation_error(str(e), is_first_run)
 
-        # Process template
+        # Process template (less memory intensive)
         if existing_template:
             config["active_template"] = existing_template
         elif template_file and template_file.filename:
@@ -500,6 +538,14 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                     f"Invalid file type. Allowed types: {', '.join(ALLOWED_EXTENSIONS['template'])}",
                     is_first_run
                 )
+                
+            # Check file size (5MB max)
+            if len(template_file.read()) > 5 * 1024 * 1024:
+                return handle_activation_error(
+                    "Template image exceeds 5MB size limit",
+                    is_first_run
+                )
+            template_file.seek(0)  # Reset file pointer after reading
                 
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
             template_filename = f"{int(time.time())}_{random_str}_{secure_filename(template_file.filename)}"
@@ -516,6 +562,8 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                 config["active_template"] = template_filename
                 cleanup_old_templates(template_filename)
             except Exception as e:
+                if os.path.exists(template_path):
+                    os.remove(template_path)
                 return handle_activation_error(str(e), is_first_run)
 
         # Validate configuration
@@ -530,7 +578,12 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                 backup_path = f"{CONFIG_PATH}.bak.{int(time.time())}"
                 shutil.copy2(CONFIG_PATH, backup_path)
             
+            # Use atomic write to prevent corruption
             atomic_write(CONFIG_PATH, json.dumps(config, indent=2))
+            
+            # Force cleanup after write
+            gc.collect()
+            
         except Exception as e:
             return handle_activation_error(f"Failed to save configuration: {str(e)}", is_first_run)
 
@@ -542,8 +595,19 @@ def activate() -> Union[Tuple[dict, int], redirect]:
             "active_dataset": config.get("active_dataset")
         })
         
+    except MemoryError:
+        return handle_activation_error("System ran out of memory during activation", is_first_run)
     except Exception as e:
         return handle_activation_error(f"Unexpected error: {str(e)}", is_first_run)
+
+
+def check_memory_available(min_mb: int = 100) -> bool:
+    """Check if at least min_mb MB of memory is available"""
+    try:
+        mem = psutil.virtual_memory()
+        return mem.available >= min_mb * 1024 * 1024
+    except:
+        return True  # If check fails, assume memory is available
 
 def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dict, int], redirect]:
     """Handle activation errors consistently."""
@@ -558,14 +622,14 @@ def process_dataset(dataset_path: str) -> pd.DataFrame:
     try:
         # Check file size first
         file_size = os.path.getsize(dataset_path) / (1024 * 1024)  # MB
-        if file_size > 5:  # More conservative limit for starter plan
+        if file_size > 2:  # Even more conservative limit for starter plan
             os.remove(dataset_path)
-            raise ValueError(f"Dataset exceeds 5MB limit for starter plan")
+            raise ValueError("Dataset exceeds 2MB limit for starter plan")
 
-        # Process in chunks with low-memory dtypes
+        # Process in smaller chunks with low-memory dtypes
         chunks = pd.read_csv(
             dataset_path,
-            chunksize=500,
+            chunksize=100,  # Smaller chunks
             dtype={
                 'ID': 'string',
                 'Name': 'string',
@@ -576,30 +640,36 @@ def process_dataset(dataset_path: str) -> pd.DataFrame:
             memory_map=True
         )
         
-        # Validate first chunk
-        first_chunk = next(chunks)
-        required_cols = {'ID', 'Name', 'Position', 'Company'}
-        if not required_cols.issubset(first_chunk.columns):
-            os.remove(dataset_path)
-            raise ValueError("Missing required columns")
-            
-        # Process remaining chunks
-        df = pd.concat([first_chunk] + [chunk for chunk in chunks])
+        # Process and save chunks incrementally
+        temp_path = f"{dataset_path}.tmp"
+        first_chunk = True
         
-        # Generate QR codes in batches
-        if 'EncryptedQR' not in df.columns:
-            for i in range(0, len(df), 100):
-                batch = df.iloc[i:i+100]
-                df.loc[i:i+100, 'EncryptedQR'] = batch.apply(generate_qr_row, axis=1)
-                gc.collect()  # Explicit garbage collection
+        for chunk in chunks:
+            # Validate first chunk
+            if first_chunk:
+                required_cols = {'ID', 'Name', 'Position', 'Company'}
+                if not required_cols.issubset(chunk.columns):
+                    os.remove(dataset_path)
+                    raise ValueError("Missing required columns")
+                first_chunk = False
             
-            df.to_csv(dataset_path, index=False)
+            # Process chunk
+            if 'EncryptedQR' not in chunk.columns:
+                chunk['EncryptedQR'] = chunk.apply(generate_qr_row, axis=1)
             
-        return df
+            # Append to temp file
+            chunk.to_csv(temp_path, mode='a', header=not os.path.exists(temp_path), index=False)
+            gc.collect()
+        
+        # Replace original with processed file
+        os.replace(temp_path, dataset_path)
+        return pd.read_csv(dataset_path)
         
     except Exception as e:
         if os.path.exists(dataset_path):
             os.remove(dataset_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         raise ValueError(f"Dataset processing failed: {str(e)}")
 
 def generate_qr_row(row):
