@@ -36,7 +36,7 @@ import psutil
 if platform.system() == "Windows":
     import win32print
 
-
+threading.stack_size(128*1024)
 
 # Load environment variables
 load_dotenv()
@@ -390,7 +390,14 @@ def scheduled_cleanup() -> None:
             app.logger.error(f"Scheduled cleanup failed: {str(e)}")
 
 # Initialize scheduler
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(
+    job_defaults={
+        'misfire_grace_time': 300,
+        'coalesce': True,  # Combine multiple pending runs
+        'max_instances': 1  # Limit concurrent job instances
+    },
+    timezone='UTC'
+)
 scheduler.add_job(func=scheduled_cleanup, trigger="interval", hours=CONFIG['CLEANUP_INTERVAL_HOURS'])
 
 try:
