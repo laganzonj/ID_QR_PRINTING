@@ -269,6 +269,52 @@
 
         window.print();
       };
+      // Enhanced print handling
+      document
+        .getElementById("printBtn")
+        .addEventListener("click", function () {
+          const printBtn = this;
+          printBtn.disabled = true;
+          printBtn.innerHTML =
+            '<i class="fas fa-spinner fa-spin"></i> Preparing...';
+
+          // Add slight delay to ensure UI updates
+          setTimeout(() => {
+            window.print();
+            setTimeout(() => {
+              printBtn.innerHTML =
+                '<i class="fas fa-print"></i> <span>Print</span>';
+              printBtn.disabled = false;
+            }, 1000);
+          }, 300);
+        });
+
+      // Add image load error handling
+      document
+        .querySelector(".paper img")
+        .addEventListener("error", function () {
+          const paper = document.querySelector(".paper");
+          paper.innerHTML = `
+        <div class="alert alert-danger">
+          <i class="fas fa-exclamation-triangle me-2"></i>
+          Failed to load preview image
+        </div>
+        <button class="btn btn-primary mt-3" onclick="window.location.reload()">
+          <i class="fas fa-sync-alt me-2"></i> Reload
+        </button>
+      `;
+        });
+
+      // Add keyboard shortcuts
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          document.getElementById("closeBtn").click();
+        }
+        if (e.ctrlKey && e.key === "p") {
+          e.preventDefault();
+          document.getElementById("printBtn").click();
+        }
+      });
     </script>
   </body>
 </html>

@@ -2,14 +2,32 @@
 <html>
   <head>
     <title>Camera Scanner</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+        padding: 20px;
+      }
+      #video {
+        background: #000;
+        margin: 20px auto;
+        border-radius: 8px;
+      }
+      .scanning-message {
+        color: #666;
+        margin-top: 10px;
+      }
+    </style>
   </head>
   <body>
     <h2>Scan your ID</h2>
     <video id="video" autoplay playsinline width="640" height="480"></video>
+    <p class="scanning-message">Position QR code within the frame</p>
 
     <script>
       document.addEventListener("DOMContentLoaded", () => {
         const video = document.getElementById("video");
+        const message = document.querySelector(".scanning-message");
 
         if (!video) {
           alert("Video element not found.");
@@ -17,12 +35,32 @@
         }
 
         navigator.mediaDevices
-          .getUserMedia({ video: true })
+          .getUserMedia({
+            video: {
+              facingMode: "environment",
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+          })
           .then((stream) => {
             video.srcObject = stream;
+            message.textContent = "Ready to scan";
           })
           .catch((err) => {
-            alert("Camera access failed: " + err.message);
+            console.error("Camera error:", err);
+            message.textContent = "Camera access failed: " + err.message;
+            message.style.color = "red";
+
+            // Fallback to file upload
+            setTimeout(() => {
+              if (
+                confirm(
+                  "Camera access failed. Would you like to upload an image instead?"
+                )
+              ) {
+                window.location.href = "/";
+              }
+            }, 1000);
           });
       });
     </script>

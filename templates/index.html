@@ -719,6 +719,51 @@
             // Proceed with normal upload flow
             document.getElementById('fileInput').click();
         }
+         // Enhanced camera initialization with retry logic
+        async function initCameraWithRetry(retries = 3, delay = 1000) {
+          try {
+            await initCamera();
+          } catch (err) {
+            if (retries > 0) {
+              showAlert(`Camera error (${retries} retries left). Trying again...`, "warning");
+              await new Promise(resolve => setTimeout(resolve, delay));
+              return initCameraWithRetry(retries - 1, delay * 1.5);
+            }
+            throw err;
+          }
+        }
+
+        // Enhanced QR code scanning with timeout
+        function startCameraWithTimeout(timeout = 30000) {
+          const timer = setTimeout(() => {
+            if (scannerActive) {
+              showAlert("Camera timed out. Please try again.", "warning");
+              stopCamera();
+            }
+          }, timeout);
+
+          startCamera().finally(() => clearTimeout(timer));
+        }
+
+        // Add this to your existing initialization
+        document.addEventListener("DOMContentLoaded", function() {
+          // ... existing code ...
+
+          // Replace initCamera() with:
+          initCameraWithRetry().catch(err => {
+            showAlert("Failed to initialize camera: " + err.message, "danger");
+            console.error("Camera initialization failed:", err);
+          });
+        });
+
+        // Add offline detection
+        window.addEventListener('offline', () => {
+          showAlert("You are offline. Some features may not work.", "warning");
+        });
+
+        window.addEventListener('online', () => {
+          showAlert("Connection restored.", "success");
+        });
     </script>
   </body>
 </html>

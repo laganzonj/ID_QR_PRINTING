@@ -275,6 +275,60 @@
         document.getElementById("loadingOverlay").style.display = "none";
         document.getElementById("submitBtn").disabled = false;
       });
+      // Add file size validation
+      function validateFile(input, maxSizeMB, allowedTypes) {
+        if (input.files.length > 0) {
+          const file = input.files[0];
+          const fileType = file.type;
+          const fileSizeMB = file.size / (1024 * 1024);
+
+          if (fileSizeMB > maxSizeMB) {
+            alert(`File size exceeds ${maxSizeMB}MB limit`);
+            input.value = "";
+            return false;
+          }
+
+          if (allowedTypes && !allowedTypes.includes(fileType)) {
+            alert("Invalid file type. Please upload a supported file.");
+            input.value = "";
+            return false;
+          }
+
+          return true;
+        }
+        return false;
+      }
+
+      // Update the file input handlers
+      document
+        .getElementById("datasetInput")
+        .addEventListener("change", function (e) {
+          if (
+            validateFile(this, 10, ["text/csv", "application/vnd.ms-excel"])
+          ) {
+            previewDatasetFile(this);
+          }
+        });
+
+      document
+        .getElementById("templateInput")
+        .addEventListener("change", function (e) {
+          if (
+            validateFile(this, 5, ["image/jpeg", "image/png", "image/webp"])
+          ) {
+            previewTemplateFile(this);
+          }
+        });
+
+      // Add loading state for form submission
+      document
+        .getElementById("setupForm")
+        .addEventListener("submit", function (e) {
+          const submitBtn = document.getElementById("submitBtn");
+          submitBtn.innerHTML =
+            '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
+          submitBtn.disabled = true;
+        });
     </script>
   </body>
 </html>
