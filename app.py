@@ -385,26 +385,23 @@ def scheduled_cleanup() -> None:
         except Exception as e:
             app.logger.error(f"Scheduled cleanup failed: {str(e)}")
 
-# Initialize scheduler
-scheduler = BackgroundScheduler(
-    job_defaults={
-        'misfire_grace_time': 300,
-        'coalesce': True,
-        'max_instances': 1
-    },
-    timezone='UTC',
-    daemon=False  # Important change
-)
-scheduler.add_job(func=scheduled_cleanup, trigger="interval", hours=CONFIG['CLEANUP_INTERVAL_HOURS'])
-
-try:
-    scheduler.start()
-    app.logger.info("Scheduler started successfully")
-except Exception as e:
-    app.logger.error(f"Failed to start scheduler: {str(e)}")
-    sys.exit(1)
-
-atexit.register(lambda: scheduler.shutdown())
+if os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
+    try:
+        scheduler = BackgroundScheduler(
+            job_defaults={
+                'misfire_grace_time': 300,
+                'coalesce': True,
+                'max_instances': 1
+            },
+            timezone='UTC',
+            daemon=False
+        )
+        scheduler.add_job(func=scheduled_cleanup, trigger="interval", hours=CONFIG['CLEANUP_INTERVAL_HOURS'])
+        scheduler.start()
+        app.logger.info("Scheduler started successfully")
+        atexit.register(lambda: scheduler.shutdown())
+    except Exception as e:
+        app.logger.error(f"Failed to start scheduler: {str(e)}")
 
 # --------------------------
 # Route Handlers
