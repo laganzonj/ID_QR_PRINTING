@@ -29,9 +29,14 @@ from functools import lru_cache
 import concurrent.futures
 import glob
 from typing import Dict, Tuple, Optional, Union
+import gc
+import resource
+import psutil
 
 if platform.system() == "Windows":
     import win32print
+
+
 
 # Load environment variables
 load_dotenv()
@@ -96,6 +101,10 @@ with open("qr_key.key", "rb") as f:
 # Global state for print jobs
 print_jobs: Dict[str, dict] = {}
 
+import logging
+logging.basicConfig(level=logging.INFO)
+app.logger.addHandler(logging.StreamHandler())
+
 # --------------------------
 # Utility Functions
 # --------------------------
@@ -112,7 +121,7 @@ def json_response(success: bool, message: str, data: Optional[dict] = None, stat
 def allowed_file(filename: str, file_type: str) -> bool:
     """Check if file extension is allowed."""
     return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS[file_type]
+        filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS[file_type]
 
 def atomic_write(filepath: str, data: str) -> None:
     """Atomic file write operation."""
@@ -141,6 +150,32 @@ def validate_template(image_path: str) -> bool:
 # --------------------------
 # Core Application Functions
 # --------------------------
+
+@app.route("/system_status")
+def system_status():
+    """Endpoint to check system resource usage"""
+    import psutil
+    return jsonify({
+        "memory": psutil.virtual_memory()._asdict(),
+        "cpu": psutil.cpu_percent(),
+        "disk": psutil.disk_usage('/')._asdict()
+    })
+
+@app.route("/health")
+def health_check():
+    """Simple health check endpoint"""
+    try:
+        # Basic system checks
+        pd.read_csv(os.path.join(DATASET_DIR, load_active_config().get("active_dataset", "")), nrows=1)
+        return "OK", 200
+    except Exception as e:
+        return str(e), 500
+
+@app.route("/profile")
+def profile():
+    from memory_profiler import profile
+    profile_view = profile(-1)(index)
+    return profile_view()
 
 def check_upload_availability() -> None:
     """Check if persistent storage is ready for uploads."""
@@ -175,12 +210,21 @@ def validate_config(config: dict) -> bool:
     
     return True
 
+# Replace get_active_dataset() with this version
 @lru_cache(maxsize=32)
 def get_active_dataset() -> Tuple[pd.DataFrame, str]:
-    """Get active dataset with caching."""
+    """Get active dataset with caching and memory-efficient loading"""
     config = load_active_config()
     dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-    return pd.read_csv(dataset_path), config["active_template"]
+    
+    # Read in chunks if file is large
+    if os.path.getsize(dataset_path) > 1 * 1024 * 1024:  # 1MB
+        chunks = pd.read_csv(dataset_path, chunksize=1000)
+        df = pd.concat(chunks)
+    else:
+        df = pd.read_csv(dataset_path)
+        
+    return df, config["active_template"]
 
 def get_template_path(filename: str) -> str:
     """Locate template file with fallback logic."""
@@ -261,6 +305,20 @@ def cleanup_temp_files() -> None:
             os.unlink(file)
         except Exception as e:
             app.logger.error(f"Failed to delete temp file {file}: {str(e)}")
+
+# Set memory limits (Unix-like systems only)
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, hard))  # 256MB soft limit
+except:
+    pass
+
+# Add periodic garbage collection
+def periodic_gc():
+    gc.collect()
+    threading.Timer(300, periodic_gc).start()  # Every 5 minutes
+
+periodic_gc()
 
 # --------------------------
 # QR Code Functions
