@@ -11,7 +11,7 @@ services:
       mkdir -p static/id_templates
       [ -f static/id_templates/default_template.png ] || touch static/id_templates/default_template.png
       touch data/.ready
-    startCommand: "gunicorn --workers 1 --timeout 30 --worker-class sync --bind :$PORT app:app"
+    startCommand: "gunicorn --workers 1 --threads 2 --timeout 60 --worker-class gthread --bind :$PORT app:app"
     envVars:
       - key: SECRET_KEY
         generateValue: true
@@ -26,6 +26,8 @@ services:
       - key: OMP_NUM_THREADS
         value: "1"
       - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_NUM_THREADS
         value: "1"
     plan: starter
     autoDeploy: true

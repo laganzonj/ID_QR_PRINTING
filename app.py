@@ -39,6 +39,13 @@ if platform.system() == "Windows":
 # Load environment variables
 load_dotenv()
 
+# Set memory limits (Unix-like systems only)
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, hard))  # 256MB soft limit
+except:
+    pass
+
 import os
 os.environ['OMP_NUM_THREADS'] = '1'  # For numpy/pandas
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
@@ -350,12 +357,16 @@ def generate_single_qr(row: pd.Series, qr_folder: str) -> None:
         app.logger.error(f"Failed to generate QR for ID {row['ID']}: {str(e)}")
 
 def generate_qrs(df: pd.DataFrame) -> None:
-    """Generate QR codes sequentially instead of in parallel"""
+    """Generate QR codes with memory efficiency"""
     current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
     clean_directory(QR_FOLDER, exclude_files=current_ids)
     
-    for _, row in df.iterrows():
-        generate_single_qr(row, QR_FOLDER)
+    # Process in batches
+    for i in range(0, len(df), 50):
+        batch = df.iloc[i:i+50]
+        for _, row in batch.iterrows():
+            generate_single_qr(row, QR_FOLDER)
+        gc.collect()  # Explicit garbage collection after each batch
 
 # --------------------------
 # Scheduled Tasks
@@ -543,67 +554,58 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
     return json_response(False, message, status=400)
 
 def process_dataset(dataset_path: str) -> pd.DataFrame:
-    """Validate and process dataset file with memory efficiency"""
+    """Process dataset in memory-efficient chunks"""
     try:
-        # First check file size
+        # Check file size first
         file_size = os.path.getsize(dataset_path) / (1024 * 1024)  # MB
-        if file_size > CONFIG['MAX_DATASET_SIZE_MB']:
+        if file_size > 5:  # More conservative limit for starter plan
             os.remove(dataset_path)
-            raise ValueError(f"Dataset exceeds maximum size of {CONFIG['MAX_DATASET_SIZE_MB']}MB")
+            raise ValueError(f"Dataset exceeds 5MB limit for starter plan")
 
-        # Read in chunks with specified dtype to reduce memory
+        # Process in chunks with low-memory dtypes
         chunks = pd.read_csv(
             dataset_path,
-            chunksize=1000,
+            chunksize=500,
             dtype={
-                'ID': 'str',
-                'Name': 'str',
-                'Position': 'str',
-                'Company': 'str'
-            }
+                'ID': 'string',
+                'Name': 'string',
+                'Position': 'string',
+                'Company': 'string'
+            },
+            engine='c',
+            memory_map=True
         )
         
-        # Process first chunk to validate columns
+        # Validate first chunk
         first_chunk = next(chunks)
         required_cols = {'ID', 'Name', 'Position', 'Company'}
         if not required_cols.issubset(first_chunk.columns):
             os.remove(dataset_path)
-            raise ValueError("Dataset missing required columns: ID, Name, Position, Company")
-
-        # Check for duplicate IDs
-        all_ids = set(first_chunk['ID'])
-        for chunk in chunks:
-            chunk_ids = set(chunk['ID'])
-            duplicates = all_ids & chunk_ids
-            if duplicates:
-                os.remove(dataset_path)
-                raise ValueError(f"Duplicate IDs found: {', '.join(duplicates)}")
-            all_ids.update(chunk_ids)
-
-        # Now read the entire file (should be safe after validation)
-        df = pd.read_csv(dataset_path, dtype={
-            'ID': 'str',
-            'Name': 'str',
-            'Position': 'str',
-            'Company': 'str'
-        })
-
-        # Check if we need to regenerate QR codes
-        if 'EncryptedQR' not in df.columns:
-            df['EncryptedQR'] = df.apply(lambda row: fernet.encrypt(
-                f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
-            ).decode(), axis=1)
-            df.to_csv(dataset_path, index=False)
+            raise ValueError("Missing required columns")
+            
+        # Process remaining chunks
+        df = pd.concat([first_chunk] + [chunk for chunk in chunks])
         
+        # Generate QR codes in batches
+        if 'EncryptedQR' not in df.columns:
+            for i in range(0, len(df), 100):
+                batch = df.iloc[i:i+100]
+                df.loc[i:i+100, 'EncryptedQR'] = batch.apply(generate_qr_row, axis=1)
+                gc.collect()  # Explicit garbage collection
+            
+            df.to_csv(dataset_path, index=False)
+            
         return df
         
-    except pd.errors.EmptyDataError:
-        os.remove(dataset_path)
-        raise ValueError("The dataset file is empty")
     except Exception as e:
         if os.path.exists(dataset_path):
             os.remove(dataset_path)
         raise ValueError(f"Dataset processing failed: {str(e)}")
+
+def generate_qr_row(row):
+    return fernet.encrypt(
+        f"id={str(row['ID']).zfill(3)};name={row['Name']};position={row['Position']};company={row['Company']}".encode()
+    ).decode()
 
 @app.route("/")
 def index():
