@@ -361,13 +361,13 @@ def generate_qrs(df: pd.DataFrame) -> None:
     current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
     clean_directory(QR_FOLDER, exclude_files=current_ids)
     
-    # Process in very small batches
-    for i in range(0, len(df), 10):  # Only 10 at a time
-        batch = df.iloc[i:i+10]
+    # Process in very small batches with delays
+    for i in range(0, len(df), 5):  # Only 5 at a time
+        batch = df.iloc[i:i+5]
         for _, row in batch.iterrows():
             generate_single_qr(row, QR_FOLDER)
         gc.collect()  # Force garbage collection
-        time.sleep(0.1)  # Brief pause to allow memory recovery
+        time.sleep(0.2)  # Pause to allow memory recovery
 
 # --------------------------
 # Scheduled Tasks
@@ -456,8 +456,15 @@ def serve_persistent_template(filename: str):
 
 @app.route("/activate", methods=["POST"])
 def activate() -> Union[Tuple[dict, int], redirect]:
-    """Activate new configuration with memory optimizations for Render starter plan."""
+    """Activate new configuration with enhanced memory optimizations."""
     try:
+        # Initial setup with memory check
+        if not check_memory_available(150):  # Need at least 150MB free
+            return handle_activation_error(
+                "System memory low. Please try again later.",
+                request.form.get("triggeredBy") == "first_run"
+            )
+
         is_first_run = request.form.get("triggeredBy") == "first_run"
         os.makedirs(DATASET_DIR, exist_ok=True)
         os.makedirs(TEMPLATE_DIR, exist_ok=True)
@@ -469,7 +476,7 @@ def activate() -> Union[Tuple[dict, int], redirect]:
         existing_template = request.form.get("existing_template")
         config = load_active_config()
         
-        # Process dataset with memory checks
+        # Process dataset with strict memory controls
         if existing_dataset:
             config["active_dataset"] = existing_dataset
         elif dataset_file and dataset_file.filename:
@@ -479,10 +486,10 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                     is_first_run
                 )
                 
-            # Check memory before processing
-            if not check_memory_available(100):  # Need at least 100MB free
+            # Check memory again right before processing
+            if not check_memory_available(120):
                 return handle_activation_error(
-                    "System memory low. Try a smaller dataset or wait a moment.",
+                    "System memory low during processing. Try a smaller dataset.",
                     is_first_run
                 )
                 
@@ -491,45 +498,56 @@ def activate() -> Union[Tuple[dict, int], redirect]:
             dataset_path = os.path.join(DATASET_DIR, dataset_filename)
             
             try:
-                # Save file first
+                # Save file first with size validation
                 dataset_file.save(dataset_path)
                 
-                # Check file size (2MB max for starter plan)
+                # Enforce strict size limit (1.5MB for extra safety)
                 file_size = os.path.getsize(dataset_path) / (1024 * 1024)
-                if file_size > 2:
+                if file_size > 1.5:
                     os.remove(dataset_path)
                     return handle_activation_error(
-                        "Dataset exceeds 2MB limit for starter plan",
+                        f"Dataset exceeds 1.5MB limit (was {file_size:.2f}MB)",
                         is_first_run
                     )
                 
-                # Process in memory-efficient way
+                # Process in ultra-conservative chunks
                 df = process_dataset(dataset_path)
                 config["active_dataset"] = dataset_filename
                 
-                # Clean QR folder before generation
-                clean_directory(QR_FOLDER)
+                # Clean QR folder with memory awareness
+                if check_memory_available(80):
+                    clean_directory(QR_FOLDER)
+                else:
+                    app.logger.warning("Skipping QR folder cleanup due to low memory")
                 
-                # Generate QR codes in small batches
+                # Generate QR codes with strict memory monitoring
+                if not check_memory_available(80):
+                    raise MemoryError("Insufficient memory for QR generation")
+                
                 generate_qrs(df)
                 
-                # Explicit cleanup
+                # Aggressive cleanup
                 del df
                 gc.collect()
+                time.sleep(0.5)  # Allow memory to settle
                 
             except MemoryError:
                 if os.path.exists(dataset_path):
                     os.remove(dataset_path)
                 return handle_activation_error(
-                    "Ran out of memory processing dataset. Try a smaller file.",
+                    "System ran out of memory during processing. Try a smaller file or wait a moment.",
                     is_first_run
                 )
             except Exception as e:
                 if os.path.exists(dataset_path):
                     os.remove(dataset_path)
-                return handle_activation_error(str(e), is_first_run)
+                app.logger.error(f"Dataset processing error: {str(e)}", exc_info=True)
+                return handle_activation_error(
+                    f"Dataset processing failed: {str(e)}",
+                    is_first_run
+                )
 
-        # Process template (less memory intensive)
+        # Process template with size checks
         if existing_template:
             config["active_template"] = existing_template
         elif template_file and template_file.filename:
@@ -539,13 +557,13 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                     is_first_run
                 )
                 
-            # Check file size (5MB max)
-            if len(template_file.read()) > 5 * 1024 * 1024:
+            # Check file size (4MB max for extra safety)
+            if len(template_file.read()) > 4 * 1024 * 1024:
                 return handle_activation_error(
-                    "Template image exceeds 5MB size limit",
+                    "Template image exceeds 4MB size limit",
                     is_first_run
                 )
-            template_file.seek(0)  # Reset file pointer after reading
+            template_file.seek(0)
                 
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
             template_filename = f"{int(time.time())}_{random_str}_{secure_filename(template_file.filename)}"
@@ -560,11 +578,20 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                         is_first_run
                     )
                 config["active_template"] = template_filename
-                cleanup_old_templates(template_filename)
+                
+                # Cleanup old templates if memory allows
+                if check_memory_available(50):
+                    cleanup_old_templates(template_filename)
+                else:
+                    app.logger.warning("Skipping template cleanup due to low memory")
+                    
             except Exception as e:
                 if os.path.exists(template_path):
                     os.remove(template_path)
-                return handle_activation_error(str(e), is_first_run)
+                return handle_activation_error(
+                    f"Template processing failed: {str(e)}", 
+                    is_first_run
+                )
 
         # Validate configuration
         if not config.get("active_dataset"):
@@ -572,42 +599,58 @@ def activate() -> Union[Tuple[dict, int], redirect]:
         if not config.get("active_template"):
             return handle_activation_error("No template selected or uploaded", is_first_run)
 
-        # Save configuration
+        # Save configuration with atomic write
         try:
             if os.path.exists(CONFIG_PATH):
                 backup_path = f"{CONFIG_PATH}.bak.{int(time.time())}"
                 shutil.copy2(CONFIG_PATH, backup_path)
             
-            # Use atomic write to prevent corruption
             atomic_write(CONFIG_PATH, json.dumps(config, indent=2))
             
-            # Force cleanup after write
+            # Force cleanup
             gc.collect()
+            time.sleep(0.2)  # Brief pause after file operations
             
         except Exception as e:
-            return handle_activation_error(f"Failed to save configuration: {str(e)}", is_first_run)
+            return handle_activation_error(
+                f"Failed to save configuration: {str(e)}",
+                is_first_run
+            )
 
-        # Return response
+        # Return response with cache buster
+        cache_buster = int(time.time())
         if is_first_run or request.form.get("triggeredBy") == "manual":
-            return redirect(url_for("index", success="true", _=int(time.time())))
+            return redirect(url_for("index", success="true", _=cache_buster))
         return json_response(True, "Activation successful", {
             "active_template": config.get("active_template"),
-            "active_dataset": config.get("active_dataset")
+            "active_dataset": config.get("active_dataset"),
+            "memory_status": f"{psutil.virtual_memory().available / (1024 * 1024):.1f}MB available"
         })
         
-    except MemoryError:
-        return handle_activation_error("System ran out of memory during activation", is_first_run)
+    except MemoryError as e:
+        app.logger.error(f"Memory error in activation: {str(e)}", exc_info=True)
+        return handle_activation_error(
+            "System ran out of memory. Please try again with smaller files.",
+            is_first_run
+        )
     except Exception as e:
-        return handle_activation_error(f"Unexpected error: {str(e)}", is_first_run)
+        app.logger.error(f"Unexpected error in activation: {str(e)}", exc_info=True)
+        return handle_activation_error(
+            f"System error: {str(e)}",
+            is_first_run
+        )
 
 
 def check_memory_available(min_mb: int = 100) -> bool:
     """Check if at least min_mb MB of memory is available"""
     try:
         mem = psutil.virtual_memory()
-        return mem.available >= min_mb * 1024 * 1024
-    except:
-        return True  # If check fails, assume memory is available
+        available_mb = mem.available / (1024 * 1024)
+        app.logger.info(f"Available memory: {available_mb:.2f}MB")
+        return available_mb >= min_mb
+    except Exception as e:
+        app.logger.error(f"Memory check failed: {str(e)}")
+        return True  # Fallback to assuming memory is available
 
 def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dict, int], redirect]:
     """Handle activation errors consistently."""
@@ -618,42 +661,37 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
     return json_response(False, message, status=400)
 
 def process_dataset(dataset_path: str) -> pd.DataFrame:
-    """Process dataset in memory-efficient chunks"""
-    temp_path = None  # Initialize temp_path here
+    """Process dataset in memory-efficient chunks with strict memory limits"""
+    temp_path = None
     
     try:
-        # Check file size first
-        file_size = os.path.getsize(dataset_path) / (1024 * 1024)  # MB
-        if file_size > 2:  # More conservative limit for starter plan
+        # Check file size first (2MB max for starter plan)
+        file_size = os.path.getsize(dataset_path) / (1024 * 1024)
+        if file_size > 2:
             os.remove(dataset_path)
-            raise ValueError(f"Dataset exceeds 2MB limit for starter plan")
+            raise ValueError("Dataset exceeds 2MB limit for starter plan")
 
-        # Initialize temp_path
         temp_path = f"{dataset_path}.tmp"
         
-        # Process in chunks with low-memory dtypes
+        # Process in small chunks with optimized dtypes
         chunks = pd.read_csv(
             dataset_path,
-            chunksize=100,  # Smaller chunks
+            chunksize=50,  # Smaller chunks for memory safety
             dtype={
                 'ID': 'string',
                 'Name': 'string',
                 'Position': 'string',
                 'Company': 'string'
             },
-            engine='c',
-            memory_map=True
+            engine='c'
         )
         
-        # Process and save chunks incrementally
         first_chunk = True
-        
         for chunk in chunks:
             # Validate first chunk
             if first_chunk:
                 required_cols = {'ID', 'Name', 'Position', 'Company'}
                 if not required_cols.issubset(chunk.columns):
-                    os.remove(dataset_path)
                     raise ValueError("Missing required columns")
                 first_chunk = False
             
@@ -663,14 +701,14 @@ def process_dataset(dataset_path: str) -> pd.DataFrame:
             
             # Append to temp file
             chunk.to_csv(temp_path, mode='a', header=not os.path.exists(temp_path), index=False)
-            gc.collect()
-        
+            gc.collect()  # Explicit garbage collection
+            
         # Replace original with processed file
         os.replace(temp_path, dataset_path)
-        return pd.read_csv(dataset_path)
+        return pd.read_csv(dataset_path, nrows=100)  # Only load sample for validation
         
     except Exception as e:
-        # Clean up temp files if they exist
+        # Clean up temp files
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
         if os.path.exists(dataset_path):
