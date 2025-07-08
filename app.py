@@ -36,10 +36,15 @@ import psutil
 if platform.system() == "Windows":
     import win32print
 
-threading.stack_size(128*1024)
-
 # Load environment variables
 load_dotenv()
+
+import os
+os.environ['OMP_NUM_THREADS'] = '1'  # For numpy/pandas
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='static')
@@ -313,12 +318,6 @@ try:
 except:
     pass
 
-# Add periodic garbage collection
-def periodic_gc():
-    gc.collect()
-    threading.Timer(300, periodic_gc).start()  # Every 5 minutes
-
-periodic_gc()
 
 # --------------------------
 # QR Code Functions
@@ -351,15 +350,12 @@ def generate_single_qr(row: pd.Series, qr_folder: str) -> None:
         app.logger.error(f"Failed to generate QR for ID {row['ID']}: {str(e)}")
 
 def generate_qrs(df: pd.DataFrame) -> None:
-    """Generate QR codes in parallel."""
+    """Generate QR codes sequentially instead of in parallel"""
     current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
     clean_directory(QR_FOLDER, exclude_files=current_ids)
     
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for _, row in df.iterrows():
-            futures.append(executor.submit(generate_single_qr, row, QR_FOLDER))
-        concurrent.futures.wait(futures)
+    for _, row in df.iterrows():
+        generate_single_qr(row, QR_FOLDER)
 
 # --------------------------
 # Scheduled Tasks
@@ -393,10 +389,11 @@ def scheduled_cleanup() -> None:
 scheduler = BackgroundScheduler(
     job_defaults={
         'misfire_grace_time': 300,
-        'coalesce': True,  # Combine multiple pending runs
-        'max_instances': 1  # Limit concurrent job instances
+        'coalesce': True,
+        'max_instances': 1
     },
-    timezone='UTC'
+    timezone='UTC',
+    daemon=False  # Important change
 )
 scheduler.add_job(func=scheduled_cleanup, trigger="interval", hours=CONFIG['CLEANUP_INTERVAL_HOURS'])
 
@@ -1079,6 +1076,3 @@ def internal_error(e):
     """Handle 500 errors."""
     app.logger.error(f"500 Error: {str(e)}\n{traceback.format_exc()}")
     return render_template("error.html", error="Internal server error"), 500
-
-# Run upload check in background
-threading.Thread(target=check_upload_availability, daemon=True).start()
