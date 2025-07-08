@@ -619,14 +619,19 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
 
 def process_dataset(dataset_path: str) -> pd.DataFrame:
     """Process dataset in memory-efficient chunks"""
+    temp_path = None  # Initialize temp_path here
+    
     try:
         # Check file size first
         file_size = os.path.getsize(dataset_path) / (1024 * 1024)  # MB
-        if file_size > 2:  # Even more conservative limit for starter plan
+        if file_size > 2:  # More conservative limit for starter plan
             os.remove(dataset_path)
-            raise ValueError("Dataset exceeds 2MB limit for starter plan")
+            raise ValueError(f"Dataset exceeds 2MB limit for starter plan")
 
-        # Process in smaller chunks with low-memory dtypes
+        # Initialize temp_path
+        temp_path = f"{dataset_path}.tmp"
+        
+        # Process in chunks with low-memory dtypes
         chunks = pd.read_csv(
             dataset_path,
             chunksize=100,  # Smaller chunks
@@ -641,7 +646,6 @@ def process_dataset(dataset_path: str) -> pd.DataFrame:
         )
         
         # Process and save chunks incrementally
-        temp_path = f"{dataset_path}.tmp"
         first_chunk = True
         
         for chunk in chunks:
@@ -666,10 +670,11 @@ def process_dataset(dataset_path: str) -> pd.DataFrame:
         return pd.read_csv(dataset_path)
         
     except Exception as e:
+        # Clean up temp files if they exist
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
         if os.path.exists(dataset_path):
             os.remove(dataset_path)
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
         raise ValueError(f"Dataset processing failed: {str(e)}")
 
 def generate_qr_row(row):
