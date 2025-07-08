@@ -227,8 +227,9 @@ def get_active_dataset() -> Tuple[pd.DataFrame, str]:
         chunks = pd.read_csv(dataset_path, chunksize=1000)
         df = pd.concat(chunks)
     else:
-        df = pd.read_csv(dataset_path)
-        
+        df_iter = pd.read_csv(dataset_path, chunksize=1000)
+        df = pd.concat(df_iter, ignore_index=True)
+
     return df, config["active_template"]
 
 def get_template_path(filename: str) -> str:
@@ -545,7 +546,8 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
 def process_dataset(dataset_path: str) -> pd.DataFrame:
     """Validate and process dataset file."""
     try:
-        df = pd.read_csv(dataset_path)
+        df_iter = pd.read_csv(dataset_path, chunksize=1000)
+        df = pd.concat(df_iter, ignore_index=True)
         required_cols = {'ID', 'Name', 'Position', 'Company'}
         
         if not required_cols.issubset(df.columns):
@@ -646,7 +648,8 @@ def index():
         # Load dataset
         try:
             dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-            df = pd.read_csv(dataset_path)
+            df_iter = pd.read_csv(dataset_path, chunksize=1000)
+            df = pd.concat(df_iter, ignore_index=True)
 
             required_columns = {'ID', 'Name', 'Position', 'Company'}
             if not required_columns.issubset(df.columns):
