@@ -33,29 +33,56 @@ import gc
 import resource
 import psutil
 
+# Memory utilities will be imported after Flask app initialization
+
 if platform.system() == "Windows":
     import win32print
 
 # Load environment variables
 load_dotenv()
 
-# Set memory limits (Unix-like systems only)
-try:
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, hard))  # 256MB soft limit
-except:
-    pass
-
+# Memory optimization settings
 import os
 os.environ['OMP_NUM_THREADS'] = '1'  # For numpy/pandas
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['PYTHONHASHSEED'] = '0'  # Deterministic hashing
+os.environ['MALLOC_TRIM_THRESHOLD_'] = '100000'  # More aggressive memory trimming
+
+# Configure pandas for low memory usage
+import pandas as pd
+pd.set_option('mode.chained_assignment', None)
+pd.set_option('compute.use_bottleneck', False)
+pd.set_option('compute.use_numexpr', False)
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='static')
 BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
+
+# Import memory utilities after Flask app initialization
+try:
+    from memory_utils import MemoryMonitor, memory_limit_check, optimize_pandas_memory, set_memory_limits, emergency_cleanup
+    MEMORY_UTILS_AVAILABLE = True
+
+    # Initialize memory optimization
+    optimize_pandas_memory()
+    set_memory_limits()
+
+except ImportError:
+    MEMORY_UTILS_AVAILABLE = False
+    print("Memory utilities not available, using basic memory management")
+
+    # Fallback memory limit setting
+    try:
+        if platform.system() != "Windows":
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            memory_limit = int(os.getenv('MEMORY_LIMIT_MB', '180')) * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (memory_limit, hard))
+            print(f"Memory limit set to {memory_limit // (1024*1024)}MB")
+    except Exception as e:
+        print(f"Could not set memory limit: {e}")
 
 # Configuration constants
 CONFIG = {
@@ -117,9 +144,91 @@ import logging
 logging.basicConfig(level=logging.INFO)
 app.logger.addHandler(logging.StreamHandler())
 
+# Memory monitoring middleware
+@app.before_request
+def monitor_memory():
+    """Monitor memory usage before each request"""
+    try:
+        mem = psutil.virtual_memory()
+        if mem.percent > 90:
+            app.logger.warning(f"High memory usage: {mem.percent}%")
+            gc.collect()  # Force garbage collection
+
+        # Skip memory-intensive operations if memory is critically low
+        if mem.percent > 95:
+            if request.endpoint in ['activate', 'get_active_dataset', 'generate_qrs']:
+                return json_response(False, "System memory critically low. Please try again later.", status=503)
+    except Exception as e:
+        app.logger.error(f"Memory monitoring failed: {e}")
+
+@app.after_request
+def cleanup_after_request(response):
+    """Cleanup after each request"""
+    try:
+        # Force garbage collection for memory-intensive endpoints
+        if request.endpoint in ['activate', 'print_id', 'print_image_direct']:
+            gc.collect()
+    except Exception as e:
+        app.logger.error(f"Post-request cleanup failed: {e}")
+    return response
+
 # --------------------------
 # Utility Functions
 # --------------------------
+
+def retry_on_memory_error(max_retries=3, delay=1.0):
+    """Decorator to retry operations on memory errors with exponential backoff"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except MemoryError as e:
+                    if attempt == max_retries - 1:
+                        app.logger.error(f"Function {func.__name__} failed after {max_retries} attempts: {e}")
+                        raise
+
+                    app.logger.warning(f"Memory error in {func.__name__}, attempt {attempt + 1}/{max_retries}")
+                    gc.collect()  # Force garbage collection
+                    time.sleep(delay * (2 ** attempt))  # Exponential backoff
+                except Exception as e:
+                    app.logger.error(f"Non-memory error in {func.__name__}: {e}")
+                    raise
+            return None
+        return wrapper
+    return decorator
+
+def safe_operation(operation_name: str):
+    """Context manager for safe operations with automatic cleanup"""
+    class SafeOperationContext:
+        def __init__(self, name):
+            self.name = name
+            self.start_memory = None
+
+        def __enter__(self):
+            try:
+                self.start_memory = psutil.virtual_memory().percent
+                app.logger.info(f"Starting {self.name} (Memory: {self.start_memory:.1f}%)")
+            except:
+                pass
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            try:
+                gc.collect()
+                end_memory = psutil.virtual_memory().percent
+                app.logger.info(f"Completed {self.name} (Memory: {end_memory:.1f}%)")
+
+                if exc_type is MemoryError:
+                    app.logger.error(f"Memory error in {self.name}")
+                    return False  # Don't suppress the exception
+                elif exc_type is not None:
+                    app.logger.error(f"Error in {self.name}: {exc_val}")
+
+            except Exception as cleanup_error:
+                app.logger.error(f"Cleanup error for {self.name}: {cleanup_error}")
+
+    return SafeOperationContext(operation_name)
 
 def json_response(success: bool, message: str, data: Optional[dict] = None, status: int = 200) -> Tuple[dict, int]:
     """Standardized JSON response format."""
@@ -185,9 +294,24 @@ def health_check():
 
 @app.route("/profile")
 def profile():
-    from memory_profiler import profile
-    profile_view = profile(-1)(index)
-    return profile_view()
+    """Simple memory profile endpoint"""
+    try:
+        mem = psutil.virtual_memory()
+        process = psutil.Process()
+        return jsonify({
+            "system_memory": {
+                "total": f"{mem.total / (1024**3):.2f} GB",
+                "available": f"{mem.available / (1024**3):.2f} GB",
+                "percent": f"{mem.percent}%"
+            },
+            "process_memory": {
+                "rss": f"{process.memory_info().rss / (1024**2):.2f} MB",
+                "vms": f"{process.memory_info().vms / (1024**2):.2f} MB",
+                "percent": f"{process.memory_percent():.2f}%"
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def check_upload_availability() -> None:
     """Check if persistent storage is ready for uploads."""
@@ -222,21 +346,43 @@ def validate_config(config: dict) -> bool:
     
     return True
 
-# Replace get_active_dataset() with this version
-@lru_cache(maxsize=32)
+# Memory-efficient dataset loading with streaming
+@lru_cache(maxsize=8)  # Reduced cache size
 def get_active_dataset() -> Tuple[pd.DataFrame, str]:
-    """Get active dataset with caching and memory-efficient loading"""
+    """Get active dataset with memory-efficient loading and strict limits"""
     config = load_active_config()
     dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-    
-    # Read in chunks if file is large
-    if os.path.getsize(dataset_path) > 1 * 1024 * 1024:  # 1MB
-        chunks = pd.read_csv(dataset_path, chunksize=1000)
-        df = pd.concat(chunks)
-    else:
-        df = pd.read_csv(dataset_path)
-        
-    return df, config["active_template"]
+
+    # Check file size first
+    file_size = os.path.getsize(dataset_path)
+    if file_size > 2 * 1024 * 1024:  # 2MB limit
+        raise ValueError(f"Dataset too large: {file_size / (1024*1024):.1f}MB (max 2MB)")
+
+    try:
+        # Use optimized dtypes and small chunks
+        df = pd.read_csv(
+            dataset_path,
+            dtype={
+                'ID': 'string',
+                'Name': 'string',
+                'Position': 'string',
+                'Company': 'string',
+                'EncryptedQR': 'string'
+            },
+            engine='c',
+            low_memory=True
+        )
+
+        # Limit number of rows for memory safety
+        if len(df) > 1000:
+            app.logger.warning(f"Dataset has {len(df)} rows, limiting to 1000")
+            df = df.head(1000)
+
+        return df, config["active_template"]
+
+    except Exception as e:
+        app.logger.error(f"Failed to load dataset: {e}")
+        raise
 
 def get_template_path(filename: str) -> str:
     """Locate template file with fallback logic."""
@@ -318,12 +464,7 @@ def cleanup_temp_files() -> None:
         except Exception as e:
             app.logger.error(f"Failed to delete temp file {file}: {str(e)}")
 
-# Set memory limits (Unix-like systems only)
-try:
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, hard))  # 256MB soft limit
-except:
-    pass
+# Memory limit already set above - removing duplicate
 
 
 # --------------------------
@@ -357,17 +498,45 @@ def generate_single_qr(row: pd.Series, qr_folder: str) -> None:
         app.logger.error(f"Failed to generate QR for ID {row['ID']}: {str(e)}")
 
 def generate_qrs(df: pd.DataFrame) -> None:
-    """Generate QR codes with strict memory limits"""
-    current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
-    clean_directory(QR_FOLDER, exclude_files=current_ids)
-    
-    # Process in very small batches with delays
-    for i in range(0, len(df), 5):  # Only 5 at a time
-        batch = df.iloc[i:i+5]
-        for _, row in batch.iterrows():
-            generate_single_qr(row, QR_FOLDER)
-        gc.collect()  # Force garbage collection
-        time.sleep(0.2)  # Pause to allow memory recovery
+    """Generate QR codes with ultra-conservative memory management"""
+    try:
+        # Check memory before starting
+        if not check_memory_available(50):
+            app.logger.warning("Insufficient memory for QR generation, skipping")
+            return
+
+        current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
+
+        # Clean directory only if memory allows
+        if check_memory_available(30):
+            clean_directory(QR_FOLDER, exclude_files=current_ids)
+
+        # Process one at a time with aggressive memory management
+        total_rows = len(df)
+        for i, (_, row) in enumerate(df.iterrows()):
+            try:
+                # Check memory before each QR generation
+                if not check_memory_available(20):
+                    app.logger.warning(f"Low memory, stopping QR generation at {i}/{total_rows}")
+                    break
+
+                generate_single_qr(row, QR_FOLDER)
+
+                # Aggressive cleanup every 3 QRs
+                if i % 3 == 0:
+                    gc.collect()
+                    time.sleep(0.1)  # Brief pause
+
+            except Exception as e:
+                app.logger.error(f"Failed to generate QR for ID {row['ID']}: {e}")
+                continue
+
+        # Final cleanup
+        gc.collect()
+
+    except Exception as e:
+        app.logger.error(f"QR generation failed: {e}")
+        raise
 
 # --------------------------
 # Scheduled Tasks
@@ -661,59 +830,103 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
     return json_response(False, message, status=400)
 
 def process_dataset(dataset_path: str) -> pd.DataFrame:
-    """Process dataset in memory-efficient chunks with strict memory limits"""
+    """Process dataset with ultra-conservative memory management"""
     temp_path = None
-    
+
     try:
-        # Check file size first (2MB max for starter plan)
+        # Strict file size check (1.5MB max for extra safety)
         file_size = os.path.getsize(dataset_path) / (1024 * 1024)
-        if file_size > 2:
+        if file_size > 1.5:
             os.remove(dataset_path)
-            raise ValueError("Dataset exceeds 2MB limit for starter plan")
+            raise ValueError(f"Dataset exceeds 1.5MB limit (was {file_size:.2f}MB)")
+
+        # Check available memory before processing
+        if not check_memory_available(100):
+            os.remove(dataset_path)
+            raise MemoryError("Insufficient memory to process dataset")
 
         temp_path = f"{dataset_path}.tmp"
-        
-        # Process in small chunks with optimized dtypes
-        chunks = pd.read_csv(
-            dataset_path,
-            chunksize=50,  # Smaller chunks for memory safety
-            dtype={
-                'ID': 'string',
-                'Name': 'string',
-                'Position': 'string',
-                'Company': 'string'
-            },
-            engine='c'
-        )
-        
-        first_chunk = True
-        for chunk in chunks:
-            # Validate first chunk
-            if first_chunk:
-                required_cols = {'ID', 'Name', 'Position', 'Company'}
-                if not required_cols.issubset(chunk.columns):
-                    raise ValueError("Missing required columns")
-                first_chunk = False
-            
-            # Process chunk
-            if 'EncryptedQR' not in chunk.columns:
-                chunk['EncryptedQR'] = chunk.apply(generate_qr_row, axis=1)
-            
-            # Append to temp file
-            chunk.to_csv(temp_path, mode='a', header=not os.path.exists(temp_path), index=False)
-            gc.collect()  # Explicit garbage collection
-            
-        # Replace original with processed file
-        os.replace(temp_path, dataset_path)
-        return pd.read_csv(dataset_path, nrows=100)  # Only load sample for validation
-        
+
+        # Process in ultra-small chunks
+        try:
+            chunks = pd.read_csv(
+                dataset_path,
+                chunksize=25,  # Even smaller chunks
+                dtype={
+                    'ID': 'string',
+                    'Name': 'string',
+                    'Position': 'string',
+                    'Company': 'string'
+                },
+                engine='c',
+                low_memory=True
+            )
+
+            first_chunk = True
+            processed_rows = 0
+            max_rows = 500  # Limit total rows
+
+            for chunk in chunks:
+                # Memory check before each chunk
+                if not check_memory_available(50):
+                    app.logger.warning("Low memory during processing, stopping early")
+                    break
+
+                # Validate first chunk
+                if first_chunk:
+                    required_cols = {'ID', 'Name', 'Position', 'Company'}
+                    if not required_cols.issubset(chunk.columns):
+                        raise ValueError("Missing required columns: " + str(required_cols - set(chunk.columns)))
+                    first_chunk = False
+
+                # Limit total rows
+                if processed_rows + len(chunk) > max_rows:
+                    chunk = chunk.head(max_rows - processed_rows)
+
+                # Process chunk with memory monitoring
+                if 'EncryptedQR' not in chunk.columns:
+                    chunk['EncryptedQR'] = chunk.apply(generate_qr_row, axis=1)
+
+                # Append to temp file
+                chunk.to_csv(temp_path, mode='a', header=not os.path.exists(temp_path), index=False)
+                processed_rows += len(chunk)
+
+                # Aggressive cleanup
+                del chunk
+                gc.collect()
+                time.sleep(0.1)  # Brief pause
+
+                if processed_rows >= max_rows:
+                    break
+
+            # Replace original with processed file
+            if os.path.exists(temp_path):
+                os.replace(temp_path, dataset_path)
+
+            # Return minimal sample for validation
+            return pd.read_csv(dataset_path, nrows=10, dtype='string')
+
+        except pd.errors.EmptyDataError:
+            raise ValueError("Dataset file is empty or corrupted")
+        except pd.errors.ParserError as e:
+            raise ValueError(f"Dataset parsing failed: {str(e)}")
+
     except Exception as e:
-        # Clean up temp files
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
-        if os.path.exists(dataset_path):
-            os.remove(dataset_path)
-        raise ValueError(f"Dataset processing failed: {str(e)}")
+        # Comprehensive cleanup
+        for path in [temp_path, dataset_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+        # Force memory cleanup
+        gc.collect()
+
+        if isinstance(e, (MemoryError, ValueError)):
+            raise
+        else:
+            raise ValueError(f"Dataset processing failed: {str(e)}")
 
 def generate_qr_row(row):
     return fernet.encrypt(
@@ -779,19 +992,52 @@ def index():
         if not config.get("active_dataset") or not config.get("active_template"):
             return redirect(url_for("first_run_setup"))
 
-        # Load dataset
+        # Load dataset with memory-efficient processing
         try:
+            # Check memory before loading dataset
+            if not check_memory_available(80):
+                flash("System memory low. Please wait and try again.", "warning")
+                return redirect(url_for("first_run_setup"))
+
             dataset_path = os.path.join(DATASET_DIR, config["active_dataset"])
-            df = pd.read_csv(dataset_path)
+
+            # Load with optimized settings
+            df = pd.read_csv(
+                dataset_path,
+                dtype={
+                    'ID': 'string',
+                    'Name': 'string',
+                    'Position': 'string',
+                    'Company': 'string',
+                    'EncryptedQR': 'string'
+                },
+                engine='c',
+                low_memory=True
+            )
 
             required_columns = {'ID', 'Name', 'Position', 'Company'}
             if not required_columns.issubset(df.columns):
                 flash("Dataset missing required columns", "error")
                 return redirect(url_for("first_run_setup"))
 
-            update_encrypted_qr_column(df)
-            generate_qrs(df)
+            # Limit dataset size for memory safety
+            if len(df) > 1000:
+                app.logger.warning(f"Dataset has {len(df)} rows, limiting to 1000")
+                df = df.head(1000)
+                flash(f"Dataset limited to 1000 rows for memory safety", "warning")
 
+            # Process QR codes only if needed and memory allows
+            if check_memory_available(60):
+                update_encrypted_qr_column(df)
+                generate_qrs(df)
+            else:
+                app.logger.warning("Skipping QR generation due to low memory")
+                flash("QR codes will be generated on demand due to memory constraints", "info")
+
+        except MemoryError:
+            app.logger.error("Memory error loading dataset")
+            flash("Dataset too large for available memory", "error")
+            return redirect(url_for("first_run_setup"))
         except Exception as e:
             app.logger.error(f"Dataset processing failed: {str(e)}")
             flash("Failed to process dataset", "error")
@@ -831,36 +1077,47 @@ def parse_qr_content(qr_content: str) -> Optional[str]:
     return None
 
 def find_employee_by_id(id_value: str) -> Optional[pd.Series]:
-    """Find employee by ID with flexible matching."""
-    df, _ = get_active_dataset()
-    
-    # Try exact match first
-    exact_match = df[df['ID'].astype(str) == id_value]
-    if not exact_match.empty:
-        return exact_match.iloc[0]
-        
-    # Try padded match (e.g. "1" -> "001")
-    padded_id = id_value.zfill(3)
-    padded_match = df[df['ID'].astype(str) == padded_id]
-    if not padded_match.empty:
-        return padded_match.iloc[0]
-        
-    # Try stripped match (e.g. "001" -> "1")
-    stripped_id = id_value.lstrip('0')
-    if stripped_id:
-        stripped_match = df[df['ID'].astype(str) == stripped_id]
-        if not stripped_match.empty:
-            return stripped_match.iloc[0]
-            
-    # Fall back to fuzzy matching
-    best_match = None
-    best_score = 0
-    for _, row in df.iterrows():
-        score = SequenceMatcher(None, str(row['ID']), id_value).ratio()
-        if score > best_score and score > 0.8:
-            best_score = score
-            best_match = row
-    return best_match
+    """Find employee by ID with memory-efficient flexible matching."""
+    try:
+        df, _ = get_active_dataset()
+
+        # Convert ID column to string once for efficiency
+        id_series = df['ID'].astype(str)
+
+        # Try exact match first
+        exact_mask = id_series == id_value
+        if exact_mask.any():
+            return df[exact_mask].iloc[0]
+
+        # Try padded match (e.g. "1" -> "001")
+        padded_id = id_value.zfill(3)
+        padded_mask = id_series == padded_id
+        if padded_mask.any():
+            return df[padded_mask].iloc[0]
+
+        # Try stripped match (e.g. "001" -> "1")
+        stripped_id = id_value.lstrip('0')
+        if stripped_id:
+            stripped_mask = id_series == stripped_id
+            if stripped_mask.any():
+                return df[stripped_mask].iloc[0]
+
+        # Memory-efficient fuzzy matching (limit to first 100 rows)
+        search_df = df.head(100) if len(df) > 100 else df
+        best_match = None
+        best_score = 0
+
+        for _, row in search_df.iterrows():
+            score = SequenceMatcher(None, str(row['ID']), id_value).ratio()
+            if score > best_score and score > 0.8:
+                best_score = score
+                best_match = row
+
+        return best_match
+
+    except Exception as e:
+        app.logger.error(f"Employee search failed: {e}")
+        return None
 
 @app.route("/get_data", methods=["POST"])
 def get_data() -> Tuple[dict, int]:
@@ -1117,38 +1374,128 @@ def print_image_direct() -> Tuple[dict, int]:
         app.logger.error(f"Direct print failed: {str(e)}", exc_info=True)
         return json_response(False, f"Unexpected error: {str(e)}", status=500)
 
-def handle_printing(file_path: str, output_filename: str, job_description: str = "") -> Tuple[dict, int]:
-    """Handle printing for both ID cards and direct images."""
+def detect_printers() -> Tuple[bool, str, str]:
+    """Enhanced cross-platform printer detection with multiple fallbacks"""
     printer_detected = False
     printer_name = None
     print_error = None
-    
-    # Printer detection
-    if platform.system() == "Windows":
+
+    system = platform.system()
+
+    if system == "Windows":
         try:
-            printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
-            if printers:
-                printer_detected = True
-                printer_name = printers[0][2]
-        except Exception as e:
-            app.logger.error(f"Windows printer detection failed: {str(e)}")
-            print_error = str(e)
-    else:
-        try:
-            result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True)
-            if "enabled" in result.stdout.lower():
-                printer_detected = True
-                lines = result.stdout.split('\n')
-                if lines and ' ' in lines[0]:
-                    printer_name = lines[0].split(' ')[1]
-        except FileNotFoundError:
-            try:
-                result = subprocess.run(["lpstat", "-a"], capture_output=True, text=True)
-                if result.stdout.strip():
+            # Try win32print first
+            if 'win32print' in sys.modules:
+                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+                if printers:
                     printer_detected = True
+                    printer_name = printers[0][2]
+                    return printer_detected, printer_name, print_error
+        except Exception as e:
+            app.logger.warning(f"win32print failed: {e}")
+
+        # Fallback to PowerShell
+        try:
+            result = subprocess.run([
+                "powershell", "-Command",
+                "Get-Printer | Where-Object {$_.PrinterStatus -eq 'Normal'} | Select-Object -First 1 -ExpandProperty Name"
+            ], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                printer_detected = True
+                printer_name = result.stdout.strip()
+                return printer_detected, printer_name, print_error
+        except Exception as e:
+            app.logger.warning(f"PowerShell printer detection failed: {e}")
+
+        # Final fallback to wmic
+        try:
+            result = subprocess.run([
+                "wmic", "printer", "where", "WorkOffline=FALSE", "get", "Name", "/format:list"
+            ], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if line.startswith('Name=') and line.strip() != 'Name=':
+                        printer_detected = True
+                        printer_name = line.split('=', 1)[1].strip()
+                        break
+        except Exception as e:
+            print_error = f"All Windows printer detection methods failed: {e}"
+
+    elif system == "Darwin":  # macOS
+        try:
+            # Use lpstat for macOS
+            result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if 'idle' in line.lower() or 'enabled' in line.lower():
+                        printer_detected = True
+                        parts = line.split()
+                        if len(parts) > 1:
+                            printer_name = parts[1]
+                        break
+        except Exception as e:
+            app.logger.warning(f"macOS lpstat failed: {e}")
+
+        # Fallback to system_profiler
+        if not printer_detected:
+            try:
+                result = subprocess.run([
+                    "system_profiler", "SPPrintersDataType", "-xml"
+                ], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and "printer" in result.stdout.lower():
+                    printer_detected = True
+                    printer_name = "default"
             except Exception as e:
-                app.logger.error(f"Linux printer detection failed: {str(e)}")
-                print_error = str(e)
+                print_error = f"macOS printer detection failed: {e}"
+
+    else:  # Linux and other Unix-like systems
+        # Try lpstat first
+        try:
+            result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if 'enabled' in line.lower() or 'idle' in line.lower():
+                        printer_detected = True
+                        parts = line.split()
+                        if len(parts) > 1:
+                            printer_name = parts[1]
+                        break
+        except FileNotFoundError:
+            app.logger.warning("lpstat not found")
+        except Exception as e:
+            app.logger.warning(f"lpstat failed: {e}")
+
+        # Fallback to lpstat -a
+        if not printer_detected:
+            try:
+                result = subprocess.run(["lpstat", "-a"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and result.stdout.strip():
+                    lines = result.stdout.strip().split('\n')
+                    if lines and lines[0]:
+                        printer_detected = True
+                        printer_name = lines[0].split()[0]
+            except Exception as e:
+                app.logger.warning(f"lpstat -a failed: {e}")
+
+        # Try lpadmin as final fallback
+        if not printer_detected:
+            try:
+                result = subprocess.run(["lpadmin", "-p"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    printer_detected = True
+                    printer_name = "default"
+            except Exception as e:
+                print_error = f"Linux printer detection failed: {e}"
+
+    return printer_detected, printer_name, print_error
+
+def handle_printing(file_path: str, output_filename: str, job_description: str = "") -> Tuple[dict, int]:
+    """Enhanced cross-platform printing with robust fallbacks"""
+
+    # Detect printers with enhanced detection
+    printer_detected, printer_name, print_error = detect_printers()
 
     if not printer_detected:
         return json_response(False, print_error or "No printer detected", {
@@ -1156,30 +1503,85 @@ def handle_printing(file_path: str, output_filename: str, job_description: str =
             "message": "Document saved and available for download"
         }, 503)
 
-    # Printing implementation
+    # Enhanced printing implementation
     print_success = False
-    
+    system = platform.system()
+
     try:
-        if platform.system() == "Windows":
-            if printer_name:
-                win32print.SetDefaultPrinter(printer_name)
-            os.startfile(file_path, "print")
-            print_success = True
-        else:
-            print_cmd = ["lp"]
-            if printer_name:
-                print_cmd.extend(["-d", printer_name])
-            print_cmd.append(file_path)
-            
+        if system == "Windows":
+            # Try multiple Windows printing methods
             try:
-                subprocess.run(print_cmd, check=True, timeout=10)
+                # Method 1: win32print (if available)
+                if 'win32print' in sys.modules and printer_name:
+                    win32print.SetDefaultPrinter(printer_name)
+                    os.startfile(file_path, "print")
+                    print_success = True
+            except Exception as e:
+                app.logger.warning(f"win32print failed: {e}")
+
+            # Method 2: PowerShell printing
+            if not print_success:
+                try:
+                    ps_cmd = f'Start-Process -FilePath "{file_path}" -Verb Print -WindowStyle Hidden'
+                    subprocess.run(["powershell", "-Command", ps_cmd], timeout=15, check=True)
+                    print_success = True
+                except Exception as e:
+                    app.logger.warning(f"PowerShell printing failed: {e}")
+
+            # Method 3: Direct file association
+            if not print_success:
+                try:
+                    os.startfile(file_path, "print")
+                    print_success = True
+                except Exception as e:
+                    print_error = f"Windows printing failed: {e}"
+
+        elif system == "Darwin":  # macOS
+            # Try lp command for macOS
+            try:
+                print_cmd = ["lp"]
+                if printer_name and printer_name != "default":
+                    print_cmd.extend(["-d", printer_name])
+                print_cmd.append(file_path)
+
+                subprocess.run(print_cmd, check=True, timeout=15)
                 print_success = True
-            except subprocess.TimeoutExpired:
-                print_error = "Print job timed out"
             except subprocess.CalledProcessError as e:
-                print_error = f"Print command failed with code {e.returncode}"
+                print_error = f"macOS lp command failed with code {e.returncode}"
+            except subprocess.TimeoutExpired:
+                print_error = "macOS print job timed out"
+            except Exception as e:
+                print_error = f"macOS printing failed: {e}"
+
+        else:  # Linux and other Unix-like systems
+            # Try multiple Linux printing methods
+            print_commands = [
+                ["lp"] + (["-d", printer_name] if printer_name else []) + [file_path],
+                ["lpr"] + (["-P", printer_name] if printer_name else []) + [file_path]
+            ]
+
+            for cmd in print_commands:
+                try:
+                    subprocess.run(cmd, check=True, timeout=15)
+                    print_success = True
+                    break
+                except FileNotFoundError:
+                    continue
+                except subprocess.CalledProcessError as e:
+                    app.logger.warning(f"Print command {cmd[0]} failed with code {e.returncode}")
+                    continue
+                except subprocess.TimeoutExpired:
+                    app.logger.warning(f"Print command {cmd[0]} timed out")
+                    continue
+                except Exception as e:
+                    app.logger.warning(f"Print command {cmd[0]} failed: {e}")
+                    continue
+
+            if not print_success:
+                print_error = "All Linux printing methods failed"
+
     except Exception as e:
-        print_error = str(e)
+        print_error = f"Unexpected printing error: {e}"
         app.logger.error(f"Printing failed: {print_error}")
 
     if not print_success:
@@ -1199,13 +1601,28 @@ def show_preview(session_id: str):
     h = request.args.get("h", "11.69")
     return render_template("preview.html", session_id=session_id, w=w, h=h)
 
+@app.route("/download_file/<filename>")
+def download_file(filename: str):
+    """Download generated files (PDFs, images, etc.)"""
+    try:
+        return send_from_directory(DATA_DIR, filename, as_attachment=True)
+    except FileNotFoundError:
+        return json_response(False, "File not found", status=404)
+
 @app.errorhandler(404)
-def not_found_error(e):
+def not_found_error(error):
     """Handle 404 errors."""
     return render_template("error.html", error="Page not found"), 404
 
 @app.errorhandler(500)
-def internal_error(e):
+def internal_error(error):
     """Handle 500 errors."""
-    app.logger.error(f"500 Error: {str(e)}\n{traceback.format_exc()}")
+    app.logger.error(f"500 Error: {str(error)}\n{traceback.format_exc()}")
     return render_template("error.html", error="Internal server error"), 500
+
+@app.errorhandler(MemoryError)
+def memory_error(error):
+    """Handle memory errors gracefully."""
+    app.logger.error(f"Memory Error: {str(error)}")
+    gc.collect()  # Force garbage collection
+    return render_template("error.html", error="System memory low. Please try again with smaller files."), 503
