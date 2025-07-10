@@ -1108,15 +1108,21 @@
 
               if (data.success) {
                 this.isGenerating = true;
-                this.startStatusMonitoring();
 
-                generateBtn.classList.add('hidden');
-                stopBtn.classList.remove('hidden');
+                // Check if it's synchronous mode
+                if (data.data && data.data.mode === 'synchronous') {
+                  uiManager.showAlert('QR generation completed in synchronous mode', 'success');
+                  generateBtn.disabled = false;
+                  generateBtn.innerHTML = '<i class="fas fa-magic"></i> Generate All QRs';
+                } else {
+                  // Background mode
+                  this.startStatusMonitoring();
+                  generateBtn.classList.add('hidden');
+                  stopBtn.classList.remove('hidden');
+                  document.getElementById('qrGenerationStatus').classList.remove('hidden');
+                }
 
                 uiManager.showAlert(data.message, 'success');
-
-                // Show status section
-                document.getElementById('qrGenerationStatus').classList.remove('hidden');
 
               } else {
                 uiManager.showAlert(data.message || 'Failed to start QR generation', 'danger');

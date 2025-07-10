@@ -760,16 +760,30 @@ def background_qr_worker():
             qr_generation_status['failed'] += 1
             qr_generation_queue.task_done()
 
-# Start background worker thread
-background_worker_thread = threading.Thread(target=background_qr_worker, daemon=True)
-background_worker_thread.start()
+# Start background worker thread (deployment-safe)
+background_worker_thread = None
+try:
+    if os.getenv('ENABLE_BACKGROUND_QR', 'true').lower() == 'true':
+        background_worker_thread = threading.Thread(target=background_qr_worker, daemon=True)
+        background_worker_thread.start()
+        print("Background QR worker started successfully")
+    else:
+        print("Background QR worker disabled")
+except Exception as e:
+    print(f"Failed to start background QR worker: {e}")
+    print("QR generation will work in synchronous mode")
 
 def start_background_qr_generation(employee_ids: list):
     """Start background QR generation for a list of employee IDs"""
-    global qr_generation_status
+    global qr_generation_status, background_worker_thread
 
     if qr_generation_status['active']:
         return {'error': 'Background QR generation already in progress'}
+
+    # Check if background worker is available
+    if background_worker_thread is None or not background_worker_thread.is_alive():
+        # Fallback to synchronous generation
+        return start_synchronous_qr_generation(employee_ids)
 
     # Add batch task to queue
     qr_generation_queue.put({
@@ -778,6 +792,62 @@ def start_background_qr_generation(employee_ids: list):
     })
 
     return {'success': True, 'message': f'Background QR generation started for {len(employee_ids)} employees'}
+
+def start_synchronous_qr_generation(employee_ids: list):
+    """Fallback synchronous QR generation when threading is not available"""
+    global qr_generation_status
+
+    try:
+        qr_generation_status.update({
+            'active': True,
+            'progress': 0,
+            'total': len(employee_ids),
+            'generated': 0,
+            'failed': 0,
+            'start_time': datetime.now()
+        })
+
+        # Process in small batches synchronously
+        batch_size = 3  # Very small batches for deployment
+        for i in range(0, len(employee_ids), batch_size):
+            batch = employee_ids[i:i + batch_size]
+
+            for j, employee_id in enumerate(batch):
+                # Check memory before each generation
+                if not check_memory_available(25):
+                    app.logger.warning("Low memory, stopping synchronous QR generation")
+                    break
+
+                qr_generation_status['current_id'] = employee_id
+
+                success = generate_single_qr_on_demand(employee_id)
+
+                if success:
+                    qr_generation_status['generated'] += 1
+                else:
+                    qr_generation_status['failed'] += 1
+
+                qr_generation_status['progress'] = i + j + 1
+
+                # Brief pause and cleanup
+                time.sleep(0.05)
+                if (i + j) % 3 == 0:
+                    gc.collect()
+
+        # Mark as complete
+        qr_generation_status['active'] = False
+        qr_generation_status['current_id'] = None
+
+        return {
+            'success': True,
+            'message': f'Synchronous QR generation completed for {len(employee_ids)} employees',
+            'mode': 'synchronous'
+        }
+
+    except Exception as e:
+        qr_generation_status['active'] = False
+        app.logger.error(f"Synchronous QR generation failed: {e}")
+        return {'error': f'Synchronous QR generation failed: {str(e)}'}
 
 def stop_background_qr_generation():
     """Stop background QR generation"""
@@ -2295,19 +2365,19 @@ def create_formatted_qr(employee_data, qr_path: str) -> str:
         return None
 
 @app.errorhandler(404)
-def not_found_error(error):
+def not_found_error(_):
     """Handle 404 errors."""
     return render_template("error.html", error="Page not found"), 404
 
 @app.errorhandler(500)
-def internal_error(error):
+def internal_error(e):
     """Handle 500 errors."""
-    app.logger.error(f"500 Error: {str(error)}\n{traceback.format_exc()}")
+    app.logger.error(f"500 Error: {str(e)}\n{traceback.format_exc()}")
     return render_template("error.html", error="Internal server error"), 500
 
 @app.errorhandler(MemoryError)
-def memory_error(error):
+def memory_error(e):
     """Handle memory errors gracefully."""
-    app.logger.error(f"Memory Error: {str(error)}")
+    app.logger.error(f"Memory Error: {str(e)}")
     gc.collect()  # Force garbage collection
     return render_template("error.html", error="System memory low. Please try again with smaller files."), 503

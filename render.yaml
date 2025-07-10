@@ -6,9 +6,9 @@ services:
     buildCommand: |
       pip install --upgrade pip --no-cache-dir
       pip install -r requirements.txt --no-cache-dir --prefer-binary
-      python deploy_config.py
+      python health_check.py
       echo "Build completed successfully"
-    startCommand: "python startup.py"
+    startCommand: "python app_simple.py"
     envVars:
       - key: SECRET_KEY
         generateValue: true
@@ -29,6 +29,8 @@ services:
       - key: MEMORY_LIMIT_MB
         value: "150"
       - key: ENABLE_SCHEDULER
+        value: "false"
+      - key: ENABLE_BACKGROUND_QR
         value: "false"
       - key: PYTHONUNBUFFERED
         value: "1"
