@@ -130,7 +130,7 @@ CONFIG = {
     'TEMPLATE_DIR': 'id_templates',
     'CONFIG_FILE': 'active_config.json',
     'MAX_DATASET_SIZE_MB': 10,
-    'MAX_TEMPLATE_SIZE_MB': 5,
+    'MAX_TEMPLATE_SIZE_MB': 10,  # Increased for more flexibility
     'CLEANUP_INTERVAL_HOURS': 6,
     'FILE_RETENTION_DAYS': 7,
     'DEFAULT_TEMPLATE': 'default_template.png'
@@ -296,14 +296,82 @@ def safe_float(val: Union[str, float, None], default: float) -> float:
     except (TypeError, ValueError):
         return default
 
-def validate_template(image_path: str) -> bool:
-    """Validate template image meets requirements."""
+def optimize_template_image(image_path: str) -> bool:
+    """Optimize template image for memory efficiency while preserving quality."""
     try:
         with Image.open(image_path) as img:
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            return img.size >= (500, 500)
-    except Exception:
+            width, height = img.size
+
+            # If image is very large, resize it to a reasonable size
+            max_dimension = 2048  # 2K resolution should be plenty for templates
+            if width > max_dimension or height > max_dimension:
+                app.logger.info(f"Resizing large image from {width}x{height}")
+
+                # Calculate new dimensions maintaining aspect ratio
+                if width > height:
+                    new_width = max_dimension
+                    new_height = int((height * max_dimension) / width)
+                else:
+                    new_height = max_dimension
+                    new_width = int((width * max_dimension) / height)
+
+                # Resize with high quality
+                resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                # Convert to RGBA for consistency
+                if resized_img.mode != 'RGBA':
+                    resized_img = resized_img.convert('RGBA')
+
+                # Save the optimized image
+                resized_img.save(image_path, 'PNG', optimize=True)
+                app.logger.info(f"Image resized to {new_width}x{new_height} and saved")
+
+                return True
+            else:
+                # Image is reasonable size, just ensure it's in RGBA format
+                if img.mode != 'RGBA':
+                    rgba_img = img.convert('RGBA')
+                    rgba_img.save(image_path, 'PNG', optimize=True)
+                    app.logger.info(f"Image converted to RGBA format")
+
+                return True
+
+    except Exception as e:
+        app.logger.error(f"Image optimization failed: {str(e)}")
+        return False
+
+def validate_template(image_path: str) -> bool:
+    """Validate and optimize template image - accepts any valid image size and format."""
+    try:
+        with Image.open(image_path) as img:
+            # Get original dimensions
+            width, height = img.size
+
+            # Basic sanity checks - just ensure it's not corrupted
+            if width <= 0 or height <= 0:
+                app.logger.warning(f"Invalid image dimensions: {width}x{height}")
+                return False
+
+            # Log the image info for debugging
+            app.logger.info(f"Template image received: {width}x{height}, mode: {img.mode}, format: {img.format}")
+
+        # Optimize the image (resize if too large, convert format if needed)
+        if not optimize_template_image(image_path):
+            app.logger.error("Failed to optimize template image")
+            return False
+
+        # Verify the optimized image
+        try:
+            with Image.open(image_path) as optimized_img:
+                opt_width, opt_height = optimized_img.size
+                app.logger.info(f"Template image optimized: {opt_width}x{opt_height}, mode: {optimized_img.mode}")
+                return True
+        except Exception as verify_error:
+            app.logger.error(f"Optimized image verification failed: {verify_error}")
+            return False
+
+    except Exception as e:
+        app.logger.error(f"Template validation failed: {str(e)}")
         return False
 
 # --------------------------
@@ -1204,7 +1272,7 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                 if not validate_template(template_path):
                     os.remove(template_path)
                     return handle_activation_error(
-                        "Image dimensions too small (minimum 500x500 pixels) or invalid image file",
+                        "Invalid image file. Please upload a valid image (PNG, JPG, etc.)",
                         is_first_run
                     )
                 config["active_template"] = template_filename
