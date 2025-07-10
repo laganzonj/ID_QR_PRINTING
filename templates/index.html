@@ -103,9 +103,10 @@
           <input
             type="file"
             name="dataset_file"
-            accept=".csv"
+            accept=".csv,.CSV,.txt,.TXT,text/csv,text/plain"
             class="form-control mt-2 d-none"
             id="datasetInput"
+            title="Upload CSV file - any case accepted"
           />
         </div>
 
@@ -129,14 +130,14 @@
           <input
             type="file"
             name="template_file"
-            accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff"
+            accept=".png,.PNG,.jpg,.JPG,.jpeg,.JPEG,.gif,.GIF,.bmp,.BMP,.webp,.WEBP,.tiff,.TIFF,.tif,.TIF,image/*"
             class="form-control mt-2 d-none"
             id="templateInput"
             title="Upload any image file - no size restrictions"
           />
           <small class="text-muted mt-1 d-block">
             <i class="fas fa-info-circle text-success"></i>
-            <strong>No size restrictions!</strong> Accepts any image size and format (PNG, JPG, GIF, BMP, WebP, TIFF)
+            <strong>No size restrictions!</strong> Accepts any image format and case (PNG, png, JPG, jpg, JPEG, jpeg, GIF, gif, BMP, bmp, WebP, webp, TIFF, tiff, etc.)
           </small>
         </div>
 
