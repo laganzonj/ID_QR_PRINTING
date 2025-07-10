@@ -21,14 +21,14 @@ jsonschema==4.22.0
 ### Utilities
 python-dateutil==2.9.0
 python-dotenv==1.0.1
-APScheduler==3.10.4
+# APScheduler==3.10.4  # Optional for background tasks
 tzdata==2024.1; sys_platform == 'win32'
 
 ### Memory Management & System Monitoring
 psutil==5.9.8
 
-### Email Support
-Flask-Mail==0.9.1
+### Optional Email Support (comment out if not needed)
+# Flask-Mail==0.9.1
 
 ### Production Deployment
 gunicorn==22.0.0

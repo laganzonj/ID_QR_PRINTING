@@ -1,5 +1,12 @@
 from flask import Flask, render_template, send_from_directory, jsonify, request, redirect, url_for, send_file, flash
-from flask_mail import Mail, Message
+
+# Optional email support
+try:
+    from flask_mail import Mail, Message
+    FLASK_MAIL_AVAILABLE = True
+except ImportError:
+    FLASK_MAIL_AVAILABLE = False
+    print("Flask-Mail not available. Email features will be disabled.")
 import pandas as pd
 import sys
 import qrcode
@@ -23,7 +30,13 @@ import traceback
 from dotenv import load_dotenv
 import time
 import atexit
-from apscheduler.schedulers.background import BackgroundScheduler
+# Optional scheduler support
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    SCHEDULER_AVAILABLE = True
+except ImportError:
+    SCHEDULER_AVAILABLE = False
+    print("APScheduler not available. Background tasks will be disabled.")
 from datetime import datetime
 import base64
 from functools import lru_cache
@@ -33,10 +46,7 @@ from typing import Dict, Tuple, Optional, Union
 import gc
 import resource
 import psutil
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
+# Email imports handled by Flask-Mail
 
 # Memory utilities will be imported after Flask app initialization
 
@@ -76,12 +86,18 @@ app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', app.config['MAIL_USERNAME'])
 
 # Initialize Mail
-try:
-    mail = Mail(app)
-    MAIL_AVAILABLE = True
-except Exception as e:
-    print(f"Mail initialization failed: {e}")
+if FLASK_MAIL_AVAILABLE:
+    try:
+        mail = Mail(app)
+        MAIL_AVAILABLE = True
+        print("Email service initialized successfully")
+    except Exception as e:
+        print(f"Mail initialization failed: {e}")
+        MAIL_AVAILABLE = False
+else:
     MAIL_AVAILABLE = False
+    mail = None
+    print("Email features disabled - Flask-Mail not available")
 
 # Import memory utilities after Flask app initialization
 try:
@@ -734,7 +750,7 @@ def scheduled_cleanup() -> None:
         except Exception as e:
             app.logger.error(f"Scheduled cleanup failed: {str(e)}")
 
-if os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
+if SCHEDULER_AVAILABLE and os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
     try:
         scheduler = BackgroundScheduler(
             job_defaults={
@@ -751,6 +767,8 @@ if os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
         atexit.register(lambda: scheduler.shutdown())
     except Exception as e:
         app.logger.error(f"Failed to start scheduler: {str(e)}")
+else:
+    app.logger.info("Background scheduler disabled or not available")
 
 # --------------------------
 # Route Handlers
@@ -1230,8 +1248,8 @@ def index():
 
     
 @app.route("/download/<filename>")
-def download_qr(filename: str):
-    """Download QR code image."""
+def download_qr_file(filename: str):
+    """Download QR code image file."""
     return send_from_directory(QR_FOLDER, filename, as_attachment=True)
 
 def parse_qr_content(qr_content: str) -> Optional[str]:
