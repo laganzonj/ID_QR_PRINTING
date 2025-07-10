@@ -440,6 +440,60 @@
                     </button>
                   </div>
 
+                  <!-- QR Generation Controls -->
+                  <div class="qr-generation-section mt-6 pt-4 border-t border-gray-200">
+                    <h4 class="text-sm font-semibold text-gray-700 mb-3">
+                      <i class="fas fa-qrcode"></i>
+                      QR Code Management
+                    </h4>
+
+                    <!-- QR Generation Status -->
+                    <div id="qrGenerationStatus" class="mb-4 hidden">
+                      <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-2">
+                          <span class="text-sm font-medium text-blue-800">Generating QR Codes...</span>
+                          <span id="qrProgress" class="text-sm text-blue-600">0%</span>
+                        </div>
+                        <div class="w-full bg-blue-200 rounded-full h-2">
+                          <div id="qrProgressBar" class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                        <div class="flex justify-between text-xs text-blue-600 mt-2">
+                          <span id="qrCurrentEmployee">Starting...</span>
+                          <span id="qrETA">Calculating...</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- QR Generation Controls -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                      <button id="generateAllQRsBtn" class="btn btn-primary">
+                        <i class="fas fa-magic"></i>
+                        Generate All QRs
+                      </button>
+
+                      <button id="stopQRGenerationBtn" class="btn btn-danger hidden">
+                        <i class="fas fa-stop"></i>
+                        Stop Generation
+                      </button>
+                    </div>
+
+                    <!-- QR Statistics -->
+                    <div id="qrStats" class="grid grid-cols-3 gap-2 text-center text-xs mb-4">
+                      <div class="bg-green-50 border border-green-200 rounded p-2">
+                        <div id="qrGenerated" class="font-bold text-green-800">0</div>
+                        <div class="text-green-600">Generated</div>
+                      </div>
+                      <div class="bg-red-50 border border-red-200 rounded p-2">
+                        <div id="qrFailed" class="font-bold text-red-800">0</div>
+                        <div class="text-red-600">Failed</div>
+                      </div>
+                      <div class="bg-blue-50 border border-blue-200 rounded p-2">
+                        <div id="qrRemaining" class="font-bold text-blue-800">0</div>
+                        <div class="text-blue-600">Remaining</div>
+                      </div>
+                    </div>
+                  </div>
+
                   <!-- Bulk Actions -->
                   <div class="bulk-actions mt-6 pt-4 border-t border-gray-200">
                     <h4 class="text-sm font-semibold text-gray-700 mb-3">Bulk Actions</h4>
@@ -998,11 +1052,225 @@
           }
         }
 
+        // QR Generation Manager
+        class QRGenerationManager {
+          constructor() {
+            this.statusCheckInterval = null;
+            this.isGenerating = false;
+            this.init();
+          }
+
+          init() {
+            this.setupEventListeners();
+            this.checkInitialStatus();
+          }
+
+          setupEventListeners() {
+            document.getElementById('generateAllQRsBtn')?.addEventListener('click', () => {
+              this.startGeneration();
+            });
+
+            document.getElementById('stopQRGenerationBtn')?.addEventListener('click', () => {
+              this.stopGeneration();
+            });
+          }
+
+          async checkInitialStatus() {
+            try {
+              const response = await fetch('/qr_generation_status');
+              const data = await response.json();
+
+              if (data.success && data.data.active) {
+                this.startStatusMonitoring();
+                this.updateUI(data.data);
+              }
+            } catch (error) {
+              console.error('Failed to check initial QR status:', error);
+            }
+          }
+
+          async startGeneration() {
+            try {
+              const generateBtn = document.getElementById('generateAllQRsBtn');
+              const stopBtn = document.getElementById('stopQRGenerationBtn');
+
+              generateBtn.disabled = true;
+              generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+
+              const response = await fetch('/start_background_qr_generation', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              });
+
+              const data = await response.json();
+
+              if (data.success) {
+                this.isGenerating = true;
+                this.startStatusMonitoring();
+
+                generateBtn.classList.add('hidden');
+                stopBtn.classList.remove('hidden');
+
+                uiManager.showAlert(data.message, 'success');
+
+                // Show status section
+                document.getElementById('qrGenerationStatus').classList.remove('hidden');
+
+              } else {
+                uiManager.showAlert(data.message || 'Failed to start QR generation', 'danger');
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = '<i class="fas fa-magic"></i> Generate All QRs';
+              }
+
+            } catch (error) {
+              console.error('Failed to start QR generation:', error);
+              uiManager.showAlert('Failed to start QR generation: ' + error.message, 'danger');
+
+              const generateBtn = document.getElementById('generateAllQRsBtn');
+              generateBtn.disabled = false;
+              generateBtn.innerHTML = '<i class="fas fa-magic"></i> Generate All QRs';
+            }
+          }
+
+          async stopGeneration() {
+            try {
+              const response = await fetch('/stop_background_qr_generation', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              });
+
+              const data = await response.json();
+
+              if (data.success) {
+                this.stopStatusMonitoring();
+                uiManager.showAlert('QR generation stopped', 'info');
+              } else {
+                uiManager.showAlert('Failed to stop QR generation', 'danger');
+              }
+
+            } catch (error) {
+              console.error('Failed to stop QR generation:', error);
+              uiManager.showAlert('Failed to stop QR generation: ' + error.message, 'danger');
+            }
+          }
+
+          startStatusMonitoring() {
+            if (this.statusCheckInterval) {
+              clearInterval(this.statusCheckInterval);
+            }
+
+            this.statusCheckInterval = setInterval(() => {
+              this.checkStatus();
+            }, 2000); // Check every 2 seconds
+          }
+
+          stopStatusMonitoring() {
+            if (this.statusCheckInterval) {
+              clearInterval(this.statusCheckInterval);
+              this.statusCheckInterval = null;
+            }
+
+            this.isGenerating = false;
+            this.resetUI();
+          }
+
+          async checkStatus() {
+            try {
+              const response = await fetch('/qr_generation_status');
+              const data = await response.json();
+
+              if (data.success) {
+                this.updateUI(data.data);
+
+                // Check if generation is complete
+                if (!data.data.active && this.isGenerating) {
+                  this.stopStatusMonitoring();
+                  uiManager.showAlert(
+                    `QR generation completed! Generated: ${data.data.generated}, Failed: ${data.data.failed}`,
+                    'success'
+                  );
+                }
+              }
+
+            } catch (error) {
+              console.error('Failed to check QR status:', error);
+            }
+          }
+
+          updateUI(status) {
+            // Update progress bar
+            const progressBar = document.getElementById('qrProgressBar');
+            const progressText = document.getElementById('qrProgress');
+
+            if (progressBar && progressText) {
+              progressBar.style.width = `${status.percentage || 0}%`;
+              progressText.textContent = `${Math.round(status.percentage || 0)}%`;
+            }
+
+            // Update current employee
+            const currentEmployee = document.getElementById('qrCurrentEmployee');
+            if (currentEmployee) {
+              if (status.current_id) {
+                currentEmployee.textContent = `Processing ID: ${status.current_id}`;
+              } else if (status.active) {
+                currentEmployee.textContent = 'Preparing...';
+              } else {
+                currentEmployee.textContent = 'Idle';
+              }
+            }
+
+            // Update ETA
+            const eta = document.getElementById('qrETA');
+            if (eta && status.estimated_completion) {
+              const etaDate = new Date(status.estimated_completion);
+              const now = new Date();
+              const diffMinutes = Math.round((etaDate - now) / 60000);
+
+              if (diffMinutes > 0) {
+                eta.textContent = `ETA: ${diffMinutes}m`;
+              } else {
+                eta.textContent = 'Almost done...';
+              }
+            } else if (eta) {
+              eta.textContent = status.active ? 'Calculating...' : 'Complete';
+            }
+
+            // Update statistics
+            document.getElementById('qrGenerated').textContent = status.generated || 0;
+            document.getElementById('qrFailed').textContent = status.failed || 0;
+            document.getElementById('qrRemaining').textContent = Math.max(0, (status.total || 0) - (status.progress || 0));
+          }
+
+          resetUI() {
+            // Hide status section
+            document.getElementById('qrGenerationStatus').classList.add('hidden');
+
+            // Reset buttons
+            const generateBtn = document.getElementById('generateAllQRsBtn');
+            const stopBtn = document.getElementById('stopQRGenerationBtn');
+
+            generateBtn.classList.remove('hidden');
+            generateBtn.disabled = false;
+            generateBtn.innerHTML = '<i class="fas fa-magic"></i> Generate All QRs';
+
+            stopBtn.classList.add('hidden');
+
+            // Reset progress
+            document.getElementById('qrProgressBar').style.width = '0%';
+            document.getElementById('qrProgress').textContent = '0%';
+          }
+        }
+
         // Initialize managers
         const themeManager = new ThemeManager();
         const uiManager = new UIManager();
         const accessibilityManager = new AccessibilityManager();
         const emailDownloadManager = new EmailDownloadManager();
+        const qrGenerationManager = new QRGenerationManager();
 
         // Initialize on DOM load
         document.addEventListener("DOMContentLoaded", function() {

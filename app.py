@@ -652,6 +652,159 @@ def send_bulk_qr_emails(df: pd.DataFrame) -> dict:
     return results
 
 # --------------------------
+# Background QR Processing
+# --------------------------
+
+import threading
+import queue
+from datetime import datetime
+
+# Global background processing queue
+qr_generation_queue = queue.Queue()
+qr_generation_status = {
+    'active': False,
+    'progress': 0,
+    'total': 0,
+    'current_id': None,
+    'generated': 0,
+    'failed': 0,
+    'start_time': None,
+    'estimated_completion': None
+}
+
+def background_qr_worker():
+    """Background worker for QR generation"""
+    global qr_generation_status
+
+    while True:
+        try:
+            # Get task from queue (blocks until available)
+            task = qr_generation_queue.get(timeout=30)
+
+            if task is None:  # Shutdown signal
+                break
+
+            task_type = task.get('type')
+
+            if task_type == 'single':
+                employee_id = task.get('employee_id')
+                qr_generation_status['current_id'] = employee_id
+
+                success = generate_single_qr_on_demand(employee_id)
+
+                if success:
+                    qr_generation_status['generated'] += 1
+                else:
+                    qr_generation_status['failed'] += 1
+
+                qr_generation_status['progress'] += 1
+
+            elif task_type == 'batch':
+                employee_ids = task.get('employee_ids', [])
+                qr_generation_status.update({
+                    'active': True,
+                    'progress': 0,
+                    'total': len(employee_ids),
+                    'generated': 0,
+                    'failed': 0,
+                    'start_time': datetime.now()
+                })
+
+                for i, employee_id in enumerate(employee_ids):
+                    # Check if we should stop
+                    if not qr_generation_status['active']:
+                        break
+
+                    qr_generation_status['current_id'] = employee_id
+
+                    # Check memory before each generation
+                    if not check_memory_available(25):
+                        app.logger.warning("Low memory, pausing background QR generation")
+                        time.sleep(5)  # Wait for memory to free up
+                        continue
+
+                    success = generate_single_qr_on_demand(employee_id)
+
+                    if success:
+                        qr_generation_status['generated'] += 1
+                    else:
+                        qr_generation_status['failed'] += 1
+
+                    qr_generation_status['progress'] = i + 1
+
+                    # Estimate completion time
+                    if i > 0:
+                        elapsed = (datetime.now() - qr_generation_status['start_time']).total_seconds()
+                        rate = i / elapsed
+                        remaining = len(employee_ids) - i
+                        eta_seconds = remaining / rate if rate > 0 else 0
+                        qr_generation_status['estimated_completion'] = datetime.now().timestamp() + eta_seconds
+
+                    # Brief pause between generations
+                    time.sleep(0.1)
+
+                    # Cleanup every 5 generations
+                    if i % 5 == 0:
+                        gc.collect()
+
+                # Mark batch as complete
+                qr_generation_status['active'] = False
+                qr_generation_status['current_id'] = None
+
+            qr_generation_queue.task_done()
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            app.logger.error(f"Background QR worker error: {e}")
+            qr_generation_status['failed'] += 1
+            qr_generation_queue.task_done()
+
+# Start background worker thread
+background_worker_thread = threading.Thread(target=background_qr_worker, daemon=True)
+background_worker_thread.start()
+
+def start_background_qr_generation(employee_ids: list):
+    """Start background QR generation for a list of employee IDs"""
+    global qr_generation_status
+
+    if qr_generation_status['active']:
+        return {'error': 'Background QR generation already in progress'}
+
+    # Add batch task to queue
+    qr_generation_queue.put({
+        'type': 'batch',
+        'employee_ids': employee_ids
+    })
+
+    return {'success': True, 'message': f'Background QR generation started for {len(employee_ids)} employees'}
+
+def stop_background_qr_generation():
+    """Stop background QR generation"""
+    global qr_generation_status
+    qr_generation_status['active'] = False
+    return {'success': True, 'message': 'Background QR generation stopped'}
+
+def get_qr_generation_status():
+    """Get current QR generation status"""
+    status = qr_generation_status.copy()
+
+    # Calculate percentage
+    if status['total'] > 0:
+        status['percentage'] = (status['progress'] / status['total']) * 100
+    else:
+        status['percentage'] = 0
+
+    # Format times
+    if status['start_time']:
+        status['start_time'] = status['start_time'].isoformat()
+
+    if status['estimated_completion']:
+        status['estimated_completion'] = datetime.fromtimestamp(status['estimated_completion']).isoformat()
+
+    return status
+
+# --------------------------
 # QR Code Functions
 # --------------------------
 
@@ -681,46 +834,98 @@ def generate_single_qr(row: pd.Series, qr_folder: str) -> None:
     except Exception as e:
         app.logger.error(f"Failed to generate QR for ID {row['ID']}: {str(e)}")
 
-def generate_qrs(df: pd.DataFrame) -> None:
-    """Generate QR codes with ultra-conservative memory management"""
+def generate_single_qr_on_demand(employee_id: str) -> bool:
+    """Generate a single QR code on-demand with memory safety"""
     try:
-        # Check memory before starting
-        if not check_memory_available(50):
-            app.logger.warning("Insufficient memory for QR generation, skipping")
-            return
+        with safe_operation("on_demand_qr_generation"):
+            # Find employee data
+            employee = find_employee_by_id(employee_id)
+            if employee is None:
+                app.logger.error(f"Employee {employee_id} not found for QR generation")
+                return False
 
-        current_ids = {f"{row['ID']}.png" for _, row in df.iterrows()}
+            # Check if QR already exists
+            qr_path = os.path.join(QR_FOLDER, f"{employee_id}.png")
+            if os.path.exists(qr_path):
+                return True  # Already exists
 
-        # Clean directory only if memory allows
-        if check_memory_available(30):
-            clean_directory(QR_FOLDER, exclude_files=current_ids)
+            # Check memory before generation
+            if not check_memory_available(30):
+                app.logger.warning(f"Insufficient memory for QR generation of {employee_id}")
+                return False
 
-        # Process one at a time with aggressive memory management
-        total_rows = len(df)
-        for i, (_, row) in enumerate(df.iterrows()):
-            try:
-                # Check memory before each QR generation
-                if not check_memory_available(20):
-                    app.logger.warning(f"Low memory, stopping QR generation at {i}/{total_rows}")
-                    break
+            # Generate QR code
+            success = generate_single_qr(employee, QR_FOLDER)
 
-                generate_single_qr(row, QR_FOLDER)
+            # Cleanup
+            gc.collect()
 
-                # Aggressive cleanup every 3 QRs
-                if i % 3 == 0:
-                    gc.collect()
-                    time.sleep(0.1)  # Brief pause
-
-            except Exception as e:
-                app.logger.error(f"Failed to generate QR for ID {row['ID']}: {e}")
-                continue
-
-        # Final cleanup
-        gc.collect()
+            return success
 
     except Exception as e:
-        app.logger.error(f"QR generation failed: {e}")
-        raise
+        app.logger.error(f"On-demand QR generation failed for {employee_id}: {e}")
+        return False
+
+def generate_qrs_batch(employee_ids: list, max_batch_size: int = 5) -> dict:
+    """Generate QR codes in small batches with progress tracking"""
+    results = {
+        'generated': 0,
+        'failed': 0,
+        'skipped': 0,
+        'total': len(employee_ids),
+        'details': []
+    }
+
+    try:
+        with safe_operation("batch_qr_generation"):
+            # Process in small batches
+            for i in range(0, len(employee_ids), max_batch_size):
+                batch = employee_ids[i:i + max_batch_size]
+
+                # Check memory before each batch
+                if not check_memory_available(40):
+                    app.logger.warning(f"Low memory, stopping batch QR generation at {i}/{len(employee_ids)}")
+                    results['skipped'] = len(employee_ids) - i
+                    break
+
+                for employee_id in batch:
+                    try:
+                        if generate_single_qr_on_demand(employee_id):
+                            results['generated'] += 1
+                            results['details'].append({
+                                'id': employee_id,
+                                'status': 'generated'
+                            })
+                        else:
+                            results['failed'] += 1
+                            results['details'].append({
+                                'id': employee_id,
+                                'status': 'failed'
+                            })
+                    except Exception as e:
+                        app.logger.error(f"Batch QR generation failed for {employee_id}: {e}")
+                        results['failed'] += 1
+                        results['details'].append({
+                            'id': employee_id,
+                            'status': 'error',
+                            'error': str(e)
+                        })
+
+                # Cleanup after each batch
+                gc.collect()
+                time.sleep(0.2)  # Brief pause between batches
+
+    except Exception as e:
+        app.logger.error(f"Batch QR generation failed: {e}")
+        results['error'] = str(e)
+
+    return results
+
+# Legacy function for backward compatibility - now uses on-demand generation
+def generate_qrs(df: pd.DataFrame) -> None:
+    """Legacy QR generation - now deferred to on-demand generation"""
+    app.logger.info(f"QR generation deferred for {len(df)} employees. QRs will be generated on-demand.")
+    # No longer generates QRs during activation to prevent memory issues
 
 # --------------------------
 # Scheduled Tasks
@@ -1213,13 +1418,11 @@ def index():
                 df = df.head(1000)
                 flash(f"Dataset limited to 1000 rows for memory safety", "warning")
 
-            # Process QR codes only if needed and memory allows
-            if check_memory_available(60):
-                update_encrypted_qr_column(df)
-                generate_qrs(df)
-            else:
-                app.logger.warning("Skipping QR generation due to low memory")
-                flash("QR codes will be generated on demand due to memory constraints", "info")
+            # DEFERRED QR GENERATION - No longer generate QRs during activation
+            # QR codes will be generated on-demand or in background
+            update_encrypted_qr_column(df)  # Only update the encrypted data column
+
+            flash("Dataset activated successfully! QR codes will be generated on-demand to save memory.", "success")
 
         except MemoryError:
             app.logger.error("Memory error loading dataset")
@@ -1863,6 +2066,10 @@ def download_all_qrs():
                     employee_id = str(row['ID'])
                     qr_path = os.path.join(QR_FOLDER, f"{employee_id}.png")
 
+                    # Generate QR on-demand if it doesn't exist
+                    if not os.path.exists(qr_path):
+                        generate_single_qr_on_demand(employee_id)
+
                     if os.path.exists(qr_path):
                         # Create formatted QR
                         formatted_path = create_formatted_qr(row, qr_path)
@@ -1890,6 +2097,78 @@ def download_all_qrs():
         app.logger.error(f"Bulk QR download failed: {str(e)}")
         return json_response(False, f"Download failed: {str(e)}")
 
+@app.route("/start_background_qr_generation", methods=["POST"])
+def start_background_qr_generation_endpoint():
+    """Start background QR generation for all employees"""
+    try:
+        # Get active dataset
+        df, _ = get_active_dataset()
+        employee_ids = [str(row['ID']) for _, row in df.iterrows()]
+
+        # Filter out employees that already have QR codes
+        missing_qr_ids = []
+        for emp_id in employee_ids:
+            qr_path = os.path.join(QR_FOLDER, f"{emp_id}.png")
+            if not os.path.exists(qr_path):
+                missing_qr_ids.append(emp_id)
+
+        if not missing_qr_ids:
+            return json_response(True, "All QR codes already exist", {
+                'total_employees': len(employee_ids),
+                'missing_qrs': 0
+            })
+
+        # Start background generation
+        result = start_background_qr_generation(missing_qr_ids)
+
+        if 'error' in result:
+            return json_response(False, result['error'])
+
+        return json_response(True, f"Background QR generation started for {len(missing_qr_ids)} employees", {
+            'total_employees': len(employee_ids),
+            'missing_qrs': len(missing_qr_ids),
+            'existing_qrs': len(employee_ids) - len(missing_qr_ids)
+        })
+
+    except Exception as e:
+        app.logger.error(f"Failed to start background QR generation: {str(e)}")
+        return json_response(False, f"Failed to start background generation: {str(e)}")
+
+@app.route("/stop_background_qr_generation", methods=["POST"])
+def stop_background_qr_generation_endpoint():
+    """Stop background QR generation"""
+    try:
+        result = stop_background_qr_generation()
+        return json_response(True, result['message'])
+    except Exception as e:
+        app.logger.error(f"Failed to stop background QR generation: {str(e)}")
+        return json_response(False, f"Failed to stop background generation: {str(e)}")
+
+@app.route("/qr_generation_status")
+def qr_generation_status_endpoint():
+    """Get current QR generation status"""
+    try:
+        status = get_qr_generation_status()
+        return json_response(True, "QR generation status", status)
+    except Exception as e:
+        app.logger.error(f"Failed to get QR generation status: {str(e)}")
+        return json_response(False, f"Failed to get status: {str(e)}")
+
+@app.route("/generate_qr_on_demand/<employee_id>", methods=["POST"])
+def generate_qr_on_demand_endpoint(employee_id: str):
+    """Generate a single QR code on-demand"""
+    try:
+        success = generate_single_qr_on_demand(employee_id)
+
+        if success:
+            return json_response(True, f"QR code generated for employee {employee_id}")
+        else:
+            return json_response(False, f"Failed to generate QR code for employee {employee_id}")
+
+    except Exception as e:
+        app.logger.error(f"On-demand QR generation failed for {employee_id}: {str(e)}")
+        return json_response(False, f"QR generation failed: {str(e)}")
+
 @app.route("/download_file/<filename>")
 def download_file(filename: str):
     """Download generated files (PDFs, images, etc.)"""
@@ -1908,10 +2187,12 @@ def download_qr(employee_id: str):
             if employee is None:
                 return json_response(False, "Employee not found", status=404)
 
-            # Check if QR exists
+            # Generate QR on-demand if it doesn't exist
             qr_path = os.path.join(QR_FOLDER, f"{employee_id}.png")
             if not os.path.exists(qr_path):
-                return json_response(False, "QR code not found", status=404)
+                app.logger.info(f"Generating QR on-demand for employee {employee_id}")
+                if not generate_single_qr_on_demand(employee_id):
+                    return json_response(False, "Failed to generate QR code", status=500)
 
             # Create formatted QR image with ID and name
             formatted_qr_path = create_formatted_qr(employee, qr_path)
