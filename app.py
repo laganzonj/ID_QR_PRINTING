@@ -168,7 +168,7 @@ app.secret_key = os.getenv('SECRET_KEY')
 # Security configuration
 ALLOWED_EXTENSIONS = {
     'dataset': {'csv'},
-    'template': {'png', 'jpg', 'jpeg', 'webp'}
+    'template': {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff', 'tif'}
 }
 
 # Initialize encryption
@@ -278,9 +278,17 @@ def json_response(success: bool, message: str, data: Optional[dict] = None, stat
     }, status
 
 def allowed_file(filename: str, file_type: str) -> bool:
-    """Check if file extension is allowed."""
-    return '.' in filename and \
-        filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS[file_type]
+    """Check if file extension is allowed (case-insensitive)."""
+    if '.' not in filename:
+        return False
+
+    extension = filename.rsplit('.', 1)[1].lower()
+    allowed = extension in ALLOWED_EXTENSIONS[file_type]
+
+    # Log for debugging
+    app.logger.info(f"File extension check: '{filename}' -> extension: '{extension}' -> allowed: {allowed}")
+
+    return allowed
 
 def atomic_write(filepath: str, data: str) -> None:
     """Atomic file write operation."""
@@ -299,8 +307,35 @@ def safe_float(val: Union[str, float, None], default: float) -> float:
 def optimize_template_image(image_path: str) -> bool:
     """Optimize template image for memory efficiency while preserving quality."""
     try:
+        # First, let's get the file extension to handle different formats
+        file_ext = os.path.splitext(image_path)[1].lower()
+        app.logger.info(f"Processing image with extension: {file_ext}")
+
         with Image.open(image_path) as img:
             width, height = img.size
+            original_mode = img.mode
+            original_format = img.format
+
+            app.logger.info(f"Original image: {width}x{height}, mode: {original_mode}, format: {original_format}")
+
+            # Handle different image modes properly
+            processed_img = img
+
+            # Convert problematic modes to RGB first, then to RGBA
+            if original_mode in ['P', 'L', '1']:  # Palette, Grayscale, 1-bit
+                app.logger.info(f"Converting {original_mode} mode to RGB")
+                processed_img = img.convert('RGB')
+            elif original_mode == 'CMYK':
+                app.logger.info("Converting CMYK to RGB")
+                processed_img = img.convert('RGB')
+            elif original_mode == 'LA':  # Grayscale with alpha
+                app.logger.info("Converting LA to RGBA")
+                processed_img = img.convert('RGBA')
+
+            # Now convert to RGBA for consistency (if not already)
+            if processed_img.mode != 'RGBA':
+                app.logger.info(f"Converting {processed_img.mode} to RGBA")
+                processed_img = processed_img.convert('RGBA')
 
             # If image is very large, resize it to a reasonable size
             max_dimension = 2048  # 2K resolution should be plenty for templates
@@ -316,62 +351,98 @@ def optimize_template_image(image_path: str) -> bool:
                     new_width = int((width * max_dimension) / height)
 
                 # Resize with high quality
-                resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                processed_img = processed_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                app.logger.info(f"Image resized to {new_width}x{new_height}")
 
-                # Convert to RGBA for consistency
-                if resized_img.mode != 'RGBA':
-                    resized_img = resized_img.convert('RGBA')
+            # Always save as PNG for consistency and to preserve transparency
+            # Change the file extension to .png if it's not already
+            if not image_path.lower().endswith('.png'):
+                new_path = os.path.splitext(image_path)[0] + '.png'
+                app.logger.info(f"Changing file extension from {file_ext} to .png")
 
-                # Save the optimized image
-                resized_img.save(image_path, 'PNG', optimize=True)
-                app.logger.info(f"Image resized to {new_width}x{new_height} and saved")
+                # Save to new path and remove old file
+                processed_img.save(new_path, 'PNG', optimize=True)
 
-                return True
+                # Remove the original file if it has a different extension
+                if os.path.exists(image_path) and image_path != new_path:
+                    os.remove(image_path)
+
+                # Update the path reference (this might need to be handled by the caller)
+                app.logger.info(f"Image saved as PNG: {new_path}")
             else:
-                # Image is reasonable size, just ensure it's in RGBA format
-                if img.mode != 'RGBA':
-                    rgba_img = img.convert('RGBA')
-                    rgba_img.save(image_path, 'PNG', optimize=True)
-                    app.logger.info(f"Image converted to RGBA format")
+                # Save as PNG with optimization
+                processed_img.save(image_path, 'PNG', optimize=True)
+                app.logger.info(f"Image optimized and saved as PNG")
 
-                return True
+            return True
 
     except Exception as e:
         app.logger.error(f"Image optimization failed: {str(e)}")
+        import traceback
+        app.logger.error(f"Full traceback: {traceback.format_exc()}")
         return False
 
 def validate_template(image_path: str) -> bool:
     """Validate and optimize template image - accepts any valid image size and format."""
     try:
-        with Image.open(image_path) as img:
-            # Get original dimensions
-            width, height = img.size
+        app.logger.info(f"Validating template image: {image_path}")
 
-            # Basic sanity checks - just ensure it's not corrupted
-            if width <= 0 or height <= 0:
-                app.logger.warning(f"Invalid image dimensions: {width}x{height}")
-                return False
+        # Check if file exists
+        if not os.path.exists(image_path):
+            app.logger.error(f"Image file does not exist: {image_path}")
+            return False
 
-            # Log the image info for debugging
-            app.logger.info(f"Template image received: {width}x{height}, mode: {img.mode}, format: {img.format}")
+        # Check file size
+        file_size = os.path.getsize(image_path)
+        app.logger.info(f"Image file size: {file_size} bytes")
+
+        # Try to open and validate the image
+        try:
+            with Image.open(image_path) as img:
+                # Get original dimensions
+                width, height = img.size
+
+                # Basic sanity checks - just ensure it's not corrupted
+                if width <= 0 or height <= 0:
+                    app.logger.warning(f"Invalid image dimensions: {width}x{height}")
+                    return False
+
+                # Log the image info for debugging
+                app.logger.info(f"Template image received: {width}x{height}, mode: {img.mode}, format: {img.format}")
+        except Exception as img_error:
+            app.logger.error(f"Failed to open image file: {img_error}")
+            return False
 
         # Optimize the image (resize if too large, convert format if needed)
+        app.logger.info("Starting image optimization...")
         if not optimize_template_image(image_path):
             app.logger.error("Failed to optimize template image")
             return False
 
-        # Verify the optimized image
-        try:
-            with Image.open(image_path) as optimized_img:
-                opt_width, opt_height = optimized_img.size
-                app.logger.info(f"Template image optimized: {opt_width}x{opt_height}, mode: {optimized_img.mode}")
-                return True
-        except Exception as verify_error:
-            app.logger.error(f"Optimized image verification failed: {verify_error}")
-            return False
+        # Verify the optimized image (check both original path and potential PNG path)
+        paths_to_check = [image_path]
+        png_path = os.path.splitext(image_path)[0] + '.png'
+        if png_path != image_path:
+            paths_to_check.append(png_path)
+
+        for check_path in paths_to_check:
+            if os.path.exists(check_path):
+                try:
+                    with Image.open(check_path) as optimized_img:
+                        opt_width, opt_height = optimized_img.size
+                        app.logger.info(f"Template image optimized: {check_path} - {opt_width}x{opt_height}, mode: {optimized_img.mode}")
+                        return True
+                except Exception as verify_error:
+                    app.logger.error(f"Optimized image verification failed for {check_path}: {verify_error}")
+                    continue
+
+        app.logger.error("No valid optimized image found")
+        return False
 
     except Exception as e:
         app.logger.error(f"Template validation failed: {str(e)}")
+        import traceback
+        app.logger.error(f"Full traceback: {traceback.format_exc()}")
         return False
 
 # --------------------------
@@ -386,6 +457,26 @@ def system_status():
         "memory": psutil.virtual_memory()._asdict(),
         "cpu": psutil.cpu_percent(),
         "disk": psutil.disk_usage('/')._asdict()
+    })
+
+@app.route("/test_file_extensions")
+def test_file_extensions():
+    """Test endpoint to verify file extension handling"""
+    test_files = [
+        "test.png", "test.PNG", "test.jpg", "test.JPG",
+        "test.jpeg", "test.JPEG", "test.gif", "test.GIF",
+        "test.bmp", "test.BMP", "test.webp", "test.WEBP",
+        "test.tiff", "test.TIFF", "test.tif", "test.TIF"
+    ]
+
+    results = {}
+    for filename in test_files:
+        results[filename] = allowed_file(filename, 'template')
+
+    return jsonify({
+        "allowed_extensions": ALLOWED_EXTENSIONS['template'],
+        "test_results": results,
+        "all_passed": all(results.values())
     })
 
 @app.route("/health")
@@ -1263,19 +1354,42 @@ def activate() -> Union[Tuple[dict, int], redirect]:
                 )
             template_file.seek(0)
                 
+            # Create filename with original extension first
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-            template_filename = f"{int(time.time())}_{random_str}_{secure_filename(template_file.filename)}"
+            original_filename = secure_filename(template_file.filename)
+            template_filename = f"{int(time.time())}_{random_str}_{original_filename}"
             template_path = os.path.join(TEMPLATE_DIR, template_filename)
-            
+
             try:
                 template_file.save(template_path)
+
+                # Validate and optimize the template (may change extension to .png)
                 if not validate_template(template_path):
-                    os.remove(template_path)
+                    # Clean up any files that might have been created
+                    if os.path.exists(template_path):
+                        os.remove(template_path)
+
+                    # Check if a .png version was created
+                    png_path = os.path.splitext(template_path)[0] + '.png'
+                    if os.path.exists(png_path):
+                        os.remove(png_path)
+
                     return handle_activation_error(
                         "Invalid image file. Please upload a valid image (PNG, JPG, etc.)",
                         is_first_run
                     )
-                config["active_template"] = template_filename
+
+                # Check if the file was converted to PNG during optimization
+                png_path = os.path.splitext(template_path)[0] + '.png'
+                if os.path.exists(png_path) and png_path != template_path:
+                    # File was converted to PNG, update the filename
+                    final_filename = os.path.basename(png_path)
+                    config["active_template"] = final_filename
+                    app.logger.info(f"Template converted and saved as: {final_filename}")
+                else:
+                    # File kept original extension
+                    config["active_template"] = template_filename
+                    app.logger.info(f"Template saved as: {template_filename}")
                 
                 # Cleanup old templates if memory allows
                 if check_memory_available(50):
