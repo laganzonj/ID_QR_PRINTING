@@ -422,11 +422,47 @@
                 </div>
 
                 <!-- Action Buttons -->
-                <div class="action-buttons mt-4">
+                <div class="action-buttons mt-4 space-y-3">
                   <button id="printBtn" class="btn btn-success btn-lg w-full" disabled>
                     <i class="fas fa-print"></i>
                     Print ID Card
                   </button>
+
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <button id="downloadQrBtn" class="btn btn-primary" disabled>
+                      <i class="fas fa-download"></i>
+                      Download QR
+                    </button>
+
+                    <button id="emailQrBtn" class="btn btn-secondary" disabled>
+                      <i class="fas fa-envelope"></i>
+                      Email QR
+                    </button>
+                  </div>
+
+                  <!-- Bulk Actions -->
+                  <div class="bulk-actions mt-6 pt-4 border-t border-gray-200">
+                    <h4 class="text-sm font-semibold text-gray-700 mb-3">Bulk Actions</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <button id="emailAllBtn" class="btn btn-gradient">
+                        <i class="fas fa-paper-plane"></i>
+                        Email All QRs
+                      </button>
+
+                      <button id="downloadAllBtn" class="btn btn-secondary">
+                        <i class="fas fa-file-archive"></i>
+                        Download All
+                      </button>
+                    </div>
+
+                    <!-- Email Status -->
+                    <div id="emailStatus" class="mt-3 hidden">
+                      <div class="status-indicator processing">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Checking email support...</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -703,6 +739,271 @@
         const uiManager = new UIManager();
         const accessibilityManager = new AccessibilityManager();
 
+        // Email and Download Manager
+        class EmailDownloadManager {
+          constructor() {
+            this.currentEmployeeId = null;
+            this.emailSupport = null;
+            this.init();
+          }
+
+          init() {
+            this.setupEventListeners();
+            this.checkEmailSupport();
+          }
+
+          setupEventListeners() {
+            // Individual actions
+            document.getElementById('downloadQrBtn')?.addEventListener('click', () => {
+              this.downloadQR(this.currentEmployeeId);
+            });
+
+            document.getElementById('emailQrBtn')?.addEventListener('click', () => {
+              this.emailQR(this.currentEmployeeId);
+            });
+
+            // Bulk actions
+            document.getElementById('emailAllBtn')?.addEventListener('click', () => {
+              this.emailAllQRs();
+            });
+
+            document.getElementById('downloadAllBtn')?.addEventListener('click', () => {
+              this.downloadAllQRs();
+            });
+          }
+
+          async checkEmailSupport() {
+            try {
+              const response = await fetch('/check_email_support');
+              const data = await response.json();
+
+              this.emailSupport = data.data;
+              this.updateEmailUI();
+
+            } catch (error) {
+              console.error('Failed to check email support:', error);
+              this.updateEmailUI(false);
+            }
+          }
+
+          updateEmailUI(available = null) {
+            const emailBtn = document.getElementById('emailQrBtn');
+            const emailAllBtn = document.getElementById('emailAllBtn');
+            const statusDiv = document.getElementById('emailStatus');
+
+            if (available === false || (this.emailSupport && !this.emailSupport.mail_available)) {
+              // Email not available
+              if (emailBtn) {
+                emailBtn.disabled = true;
+                emailBtn.title = 'Email service not configured';
+              }
+              if (emailAllBtn) {
+                emailAllBtn.disabled = true;
+                emailAllBtn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Email Not Available';
+              }
+
+              if (statusDiv) {
+                statusDiv.innerHTML = `
+                  <div class="status-indicator offline">
+                    <i class="fas fa-times-circle"></i>
+                    <span>Email service not configured</span>
+                  </div>
+                `;
+                statusDiv.classList.remove('hidden');
+              }
+            } else if (this.emailSupport) {
+              // Email available
+              const hasEmails = this.emailSupport.has_email_column && this.emailSupport.email_count > 0;
+
+              if (emailAllBtn) {
+                if (hasEmails) {
+                  emailAllBtn.disabled = false;
+                  emailAllBtn.innerHTML = `<i class="fas fa-paper-plane"></i> Email All QRs (${this.emailSupport.email_count})`;
+                } else {
+                  emailAllBtn.disabled = true;
+                  emailAllBtn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> No Email Addresses';
+                }
+              }
+
+              if (statusDiv) {
+                if (hasEmails) {
+                  statusDiv.innerHTML = `
+                    <div class="status-indicator online">
+                      <i class="fas fa-check-circle"></i>
+                      <span>${this.emailSupport.email_count} of ${this.emailSupport.total_employees} employees have email addresses</span>
+                    </div>
+                  `;
+                } else {
+                  statusDiv.innerHTML = `
+                    <div class="status-indicator offline">
+                      <i class="fas fa-info-circle"></i>
+                      <span>No email addresses found in dataset. Add an 'Email' column to enable email features.</span>
+                    </div>
+                  `;
+                }
+                statusDiv.classList.remove('hidden');
+              }
+            }
+          }
+
+          setCurrentEmployee(employeeId, hasEmail = false) {
+            this.currentEmployeeId = employeeId;
+
+            // Update button states
+            const downloadBtn = document.getElementById('downloadQrBtn');
+            const emailBtn = document.getElementById('emailQrBtn');
+
+            if (downloadBtn) {
+              downloadBtn.disabled = !employeeId;
+            }
+
+            if (emailBtn) {
+              emailBtn.disabled = !employeeId || !hasEmail || !this.emailSupport?.mail_available;
+              emailBtn.title = !hasEmail ? 'No email address for this employee' :
+                              !this.emailSupport?.mail_available ? 'Email service not configured' : '';
+            }
+          }
+
+          async downloadQR(employeeId) {
+            if (!employeeId) return;
+
+            try {
+              uiManager.showAlert('Preparing QR download...', 'info', 2000);
+
+              const response = await fetch(`/download_qr/${employeeId}`);
+
+              if (response.ok) {
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `QR_${employeeId}.png`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+
+                uiManager.showAlert('QR code downloaded successfully!', 'success');
+              } else {
+                const errorData = await response.json();
+                uiManager.showAlert(errorData.message || 'Download failed', 'danger');
+              }
+            } catch (error) {
+              console.error('Download failed:', error);
+              uiManager.showAlert('Download failed: ' + error.message, 'danger');
+            }
+          }
+
+          async emailQR(employeeId) {
+            if (!employeeId) return;
+
+            try {
+              uiManager.showAlert('Sending QR via email...', 'info', 0);
+
+              // For individual email, we'll use the bulk endpoint with a filter
+              // This is a simplified approach - you might want a dedicated endpoint
+              uiManager.showAlert('Individual email sending not yet implemented. Use "Email All QRs" for now.', 'warning');
+
+            } catch (error) {
+              console.error('Email failed:', error);
+              uiManager.showAlert('Email failed: ' + error.message, 'danger');
+            }
+          }
+
+          async emailAllQRs() {
+            if (!this.emailSupport?.mail_available) {
+              uiManager.showAlert('Email service not configured', 'danger');
+              return;
+            }
+
+            if (!confirm(`Send QR codes to all employees with email addresses (${this.emailSupport.email_count} recipients)?`)) {
+              return;
+            }
+
+            try {
+              const emailAllBtn = document.getElementById('emailAllBtn');
+              const originalText = emailAllBtn.innerHTML;
+
+              emailAllBtn.disabled = true;
+              emailAllBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending Emails...';
+
+              uiManager.showAlert('Sending QR codes via email...', 'info', 0);
+
+              const response = await fetch('/send_qr_emails', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              });
+
+              const data = await response.json();
+
+              if (data.success) {
+                const summary = data.data.summary;
+                uiManager.showAlert(
+                  `Email sending completed! Sent: ${summary.sent}, Failed: ${summary.failed}, No Email: ${summary.no_email}`,
+                  'success'
+                );
+              } else {
+                uiManager.showAlert(data.message || 'Email sending failed', 'danger');
+              }
+
+            } catch (error) {
+              console.error('Bulk email failed:', error);
+              uiManager.showAlert('Email sending failed: ' + error.message, 'danger');
+            } finally {
+              const emailAllBtn = document.getElementById('emailAllBtn');
+              emailAllBtn.disabled = false;
+              emailAllBtn.innerHTML = `<i class="fas fa-paper-plane"></i> Email All QRs`;
+            }
+          }
+
+          async downloadAllQRs() {
+            try {
+              uiManager.showAlert('Preparing ZIP download...', 'info', 0);
+
+              const downloadAllBtn = document.getElementById('downloadAllBtn');
+              const originalText = downloadAllBtn.innerHTML;
+
+              downloadAllBtn.disabled = true;
+              downloadAllBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating ZIP...';
+
+              const response = await fetch('/download_all_qrs');
+
+              if (response.ok) {
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `All_QR_Codes_${new Date().toISOString().slice(0,10)}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+
+                uiManager.showAlert('All QR codes downloaded successfully!', 'success');
+              } else {
+                const errorData = await response.json();
+                uiManager.showAlert(errorData.message || 'Download failed', 'danger');
+              }
+
+            } catch (error) {
+              console.error('Bulk download failed:', error);
+              uiManager.showAlert('Download failed: ' + error.message, 'danger');
+            } finally {
+              const downloadAllBtn = document.getElementById('downloadAllBtn');
+              downloadAllBtn.disabled = false;
+              downloadAllBtn.innerHTML = '<i class="fas fa-file-archive"></i> Download All';
+            }
+          }
+        }
+
+        // Initialize managers
+        const themeManager = new ThemeManager();
+        const uiManager = new UIManager();
+        const accessibilityManager = new AccessibilityManager();
+        const emailDownloadManager = new EmailDownloadManager();
+
         // Initialize on DOM load
         document.addEventListener("DOMContentLoaded", function() {
           // Show settings modal on first load
@@ -843,6 +1144,15 @@
               document.getElementById("preview-name").textContent = data["Name"];
               document.getElementById("preview-position").textContent = data["Position"];
               document.getElementById("preview-company").textContent = data["Company"];
+
+              // Update email/download buttons
+              const hasEmail = data.Email && data.Email.trim() && data.Email.toLowerCase() !== 'nan';
+              emailDownloadManager.setCurrentEmployee(data.ID, hasEmail);
+
+              // Announce to screen readers
+              if (accessibilityManager) {
+                accessibilityManager.announceEmployeeData(data);
+              }
 
               // Auto print
               printAndRestart();

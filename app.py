@@ -1,4 +1,5 @@
 from flask import Flask, render_template, send_from_directory, jsonify, request, redirect, url_for, send_file, flash
+from flask_mail import Mail, Message
 import pandas as pd
 import sys
 import qrcode
@@ -32,6 +33,10 @@ from typing import Dict, Tuple, Optional, Union
 import gc
 import resource
 import psutil
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
 # Memory utilities will be imported after Flask app initialization
 
@@ -60,6 +65,23 @@ pd.set_option('compute.use_numexpr', False)
 # Initialize Flask app
 app = Flask(__name__, static_folder='static')
 BASE_DIR = os.getenv('BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
+
+# Email Configuration
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', '587'))
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'true').lower() == 'true'
+app.config['MAIL_USE_SSL'] = os.getenv('MAIL_USE_SSL', 'false').lower() == 'true'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER', app.config['MAIL_USERNAME'])
+
+# Initialize Mail
+try:
+    mail = Mail(app)
+    MAIL_AVAILABLE = True
+except Exception as e:
+    print(f"Mail initialization failed: {e}")
+    MAIL_AVAILABLE = False
 
 # Import memory utilities after Flask app initialization
 try:
@@ -468,6 +490,152 @@ def cleanup_temp_files() -> None:
 
 
 # --------------------------
+# Email Functions
+# --------------------------
+
+def send_qr_email(employee_data: dict, qr_image_path: str) -> bool:
+    """Send QR code via email to employee"""
+    if not MAIL_AVAILABLE or not employee_data.get('Email'):
+        return False
+
+    try:
+        with safe_operation("email_sending"):
+            # Create message
+            msg = Message(
+                subject=f"Your QR ID Card - {employee_data['Name']}",
+                recipients=[employee_data['Email']],
+                sender=app.config['MAIL_DEFAULT_SENDER']
+            )
+
+            # Email body
+            msg.html = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); padding: 20px; text-align: center; color: white;">
+                    <h1>Your QR ID Card</h1>
+                </div>
+
+                <div style="padding: 20px;">
+                    <h2>Hello {employee_data['Name']},</h2>
+
+                    <p>Your QR ID card has been generated successfully. Please find your QR code attached to this email.</p>
+
+                    <div style="background: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                        <h3>Your Details:</h3>
+                        <p><strong>ID:</strong> {employee_data['ID']}</p>
+                        <p><strong>Name:</strong> {employee_data['Name']}</p>
+                        <p><strong>Position:</strong> {employee_data['Position']}</p>
+                        <p><strong>Company:</strong> {employee_data['Company']}</p>
+                    </div>
+
+                    <p><strong>Instructions:</strong></p>
+                    <ul>
+                        <li>Save the attached QR code image to your device</li>
+                        <li>Present this QR code when required for identification</li>
+                        <li>Keep this email for your records</li>
+                    </ul>
+
+                    <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+                        This is an automated message from the ID Management System.
+                    </p>
+                </div>
+            </body>
+            </html>
+            """
+
+            # Attach QR code image
+            if os.path.exists(qr_image_path):
+                with open(qr_image_path, 'rb') as f:
+                    img_data = f.read()
+                    msg.attach(
+                        filename=f"QR_ID_{employee_data['ID']}_{employee_data['Name'].replace(' ', '_')}.png",
+                        content_type="image/png",
+                        data=img_data
+                    )
+
+            # Send email
+            mail.send(msg)
+            app.logger.info(f"QR email sent successfully to {employee_data['Email']}")
+            return True
+
+    except Exception as e:
+        app.logger.error(f"Failed to send email to {employee_data.get('Email', 'unknown')}: {str(e)}")
+        return False
+
+def send_bulk_qr_emails(df: pd.DataFrame) -> dict:
+    """Send QR codes to all employees with email addresses"""
+    results = {
+        'sent': 0,
+        'failed': 0,
+        'no_email': 0,
+        'details': []
+    }
+
+    if not MAIL_AVAILABLE:
+        return {'error': 'Email service not configured'}
+
+    try:
+        with safe_operation("bulk_email_sending"):
+            for _, row in df.iterrows():
+                employee_data = {
+                    'ID': str(row['ID']),
+                    'Name': str(row['Name']),
+                    'Position': str(row['Position']),
+                    'Company': str(row['Company']),
+                    'Email': str(row.get('Email', '')).strip()
+                }
+
+                if not employee_data['Email'] or employee_data['Email'].lower() in ['nan', 'none', '']:
+                    results['no_email'] += 1
+                    results['details'].append({
+                        'id': employee_data['ID'],
+                        'name': employee_data['Name'],
+                        'status': 'no_email'
+                    })
+                    continue
+
+                # Generate QR code for this employee
+                qr_path = os.path.join(QR_FOLDER, f"{employee_data['ID']}.png")
+
+                if not os.path.exists(qr_path):
+                    # Generate QR if it doesn't exist
+                    try:
+                        qr_img = qrcode.make(row['EncryptedQR'])
+                        qr_img.save(qr_path)
+                    except Exception as e:
+                        app.logger.error(f"Failed to generate QR for {employee_data['ID']}: {e}")
+                        results['failed'] += 1
+                        continue
+
+                # Send email
+                if send_qr_email(employee_data, qr_path):
+                    results['sent'] += 1
+                    results['details'].append({
+                        'id': employee_data['ID'],
+                        'name': employee_data['Name'],
+                        'email': employee_data['Email'],
+                        'status': 'sent'
+                    })
+                else:
+                    results['failed'] += 1
+                    results['details'].append({
+                        'id': employee_data['ID'],
+                        'name': employee_data['Name'],
+                        'email': employee_data['Email'],
+                        'status': 'failed'
+                    })
+
+                # Memory management and rate limiting
+                gc.collect()
+                time.sleep(0.5)  # Rate limiting for email sending
+
+    except Exception as e:
+        app.logger.error(f"Bulk email sending failed: {str(e)}")
+        results['error'] = str(e)
+
+    return results
+
+# --------------------------
 # QR Code Functions
 # --------------------------
 
@@ -830,33 +998,34 @@ def handle_activation_error(message: str, is_first_run: bool) -> Union[Tuple[dic
     return json_response(False, message, status=400)
 
 def process_dataset(dataset_path: str) -> pd.DataFrame:
-    """Process dataset with ultra-conservative memory management"""
+    """Process dataset with extreme memory conservation for deployment"""
     temp_path = None
 
     try:
-        # Strict file size check (1.5MB max for extra safety)
+        # Ultra-strict file size check (500KB max for deployment)
         file_size = os.path.getsize(dataset_path) / (1024 * 1024)
-        if file_size > 1.5:
+        if file_size > 0.5:  # 500KB limit
             os.remove(dataset_path)
-            raise ValueError(f"Dataset exceeds 1.5MB limit (was {file_size:.2f}MB)")
+            raise ValueError(f"Dataset exceeds 500KB limit (was {file_size:.2f}MB). Please use a smaller file.")
 
         # Check available memory before processing
-        if not check_memory_available(100):
+        if not check_memory_available(50):  # Need at least 50MB
             os.remove(dataset_path)
-            raise MemoryError("Insufficient memory to process dataset")
+            raise MemoryError("System memory too low. Please try again later.")
 
         temp_path = f"{dataset_path}.tmp"
 
-        # Process in ultra-small chunks
+        # Process in micro-chunks for deployment
         try:
             chunks = pd.read_csv(
                 dataset_path,
-                chunksize=25,  # Even smaller chunks
+                chunksize=10,  # Micro chunks for deployment
                 dtype={
                     'ID': 'string',
                     'Name': 'string',
                     'Position': 'string',
-                    'Company': 'string'
+                    'Company': 'string',
+                    'Email': 'string'  # Add email support
                 },
                 engine='c',
                 low_memory=True
@@ -864,7 +1033,7 @@ def process_dataset(dataset_path: str) -> pd.DataFrame:
 
             first_chunk = True
             processed_rows = 0
-            max_rows = 500  # Limit total rows
+            max_rows = 100  # Strict limit for deployment
 
             for chunk in chunks:
                 # Memory check before each chunk
@@ -1601,6 +1770,108 @@ def show_preview(session_id: str):
     h = request.args.get("h", "11.69")
     return render_template("preview.html", session_id=session_id, w=w, h=h)
 
+@app.route("/send_qr_emails", methods=["POST"])
+def send_qr_emails():
+    """Send QR codes via email to all employees"""
+    try:
+        if not MAIL_AVAILABLE:
+            return json_response(False, "Email service not configured. Please contact administrator.")
+
+        # Get active dataset
+        df, _ = get_active_dataset()
+
+        # Check if Email column exists
+        if 'Email' not in df.columns:
+            return json_response(False, "No email column found in dataset. Please upload a CSV with an 'Email' column.")
+
+        # Send emails
+        results = send_bulk_qr_emails(df)
+
+        if 'error' in results:
+            return json_response(False, f"Email sending failed: {results['error']}")
+
+        message = f"Email sending completed: {results['sent']} sent, {results['failed']} failed, {results['no_email']} without email"
+
+        return json_response(True, message, {
+            'results': results,
+            'summary': {
+                'total': len(df),
+                'sent': results['sent'],
+                'failed': results['failed'],
+                'no_email': results['no_email']
+            }
+        })
+
+    except Exception as e:
+        app.logger.error(f"Email sending endpoint failed: {str(e)}")
+        return json_response(False, f"Failed to send emails: {str(e)}")
+
+@app.route("/check_email_support")
+def check_email_support():
+    """Check if email functionality is available"""
+    try:
+        df, _ = get_active_dataset()
+        has_email_column = 'Email' in df.columns
+
+        email_count = 0
+        if has_email_column:
+            email_count = df['Email'].notna().sum()
+
+        return json_response(True, "Email support checked", {
+            'mail_available': MAIL_AVAILABLE,
+            'has_email_column': has_email_column,
+            'email_count': int(email_count),
+            'total_employees': len(df)
+        })
+
+    except Exception as e:
+        return json_response(False, f"Failed to check email support: {str(e)}")
+
+@app.route("/download_all_qrs")
+def download_all_qrs():
+    """Download all QR codes as a ZIP file"""
+    try:
+        with safe_operation("bulk_qr_download"):
+            import zipfile
+
+            # Get active dataset
+            df, _ = get_active_dataset()
+
+            # Create temporary ZIP file
+            zip_path = os.path.join(DATA_DIR, f"all_qrs_{int(time.time())}.zip")
+
+            with zipfile.ZipFile(zip_path, 'w') as zip_file:
+                for _, row in df.iterrows():
+                    employee_id = str(row['ID'])
+                    qr_path = os.path.join(QR_FOLDER, f"{employee_id}.png")
+
+                    if os.path.exists(qr_path):
+                        # Create formatted QR
+                        formatted_path = create_formatted_qr(row, qr_path)
+                        if formatted_path and os.path.exists(formatted_path):
+                            # Add to ZIP with descriptive name
+                            zip_name = f"QR_{employee_id}_{row['Name'].replace(' ', '_')}.png"
+                            zip_file.write(formatted_path, zip_name)
+
+                            # Clean up temporary formatted file
+                            try:
+                                os.remove(formatted_path)
+                            except:
+                                pass
+
+            if os.path.exists(zip_path):
+                return send_file(
+                    zip_path,
+                    as_attachment=True,
+                    download_name=f"All_QR_Codes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                )
+            else:
+                return json_response(False, "Failed to create ZIP file")
+
+    except Exception as e:
+        app.logger.error(f"Bulk QR download failed: {str(e)}")
+        return json_response(False, f"Download failed: {str(e)}")
+
 @app.route("/download_file/<filename>")
 def download_file(filename: str):
     """Download generated files (PDFs, images, etc.)"""
@@ -1608,6 +1879,121 @@ def download_file(filename: str):
         return send_from_directory(DATA_DIR, filename, as_attachment=True)
     except FileNotFoundError:
         return json_response(False, "File not found", status=404)
+
+@app.route("/download_qr/<employee_id>")
+def download_qr(employee_id: str):
+    """Download individual QR code with formatted layout"""
+    try:
+        with safe_operation("qr_download"):
+            # Find employee data
+            employee = find_employee_by_id(employee_id)
+            if employee is None:
+                return json_response(False, "Employee not found", status=404)
+
+            # Check if QR exists
+            qr_path = os.path.join(QR_FOLDER, f"{employee_id}.png")
+            if not os.path.exists(qr_path):
+                return json_response(False, "QR code not found", status=404)
+
+            # Create formatted QR image with ID and name
+            formatted_qr_path = create_formatted_qr(employee, qr_path)
+
+            if formatted_qr_path and os.path.exists(formatted_qr_path):
+                return send_file(
+                    formatted_qr_path,
+                    as_attachment=True,
+                    download_name=f"QR_{employee['ID']}_{employee['Name'].replace(' ', '_')}.png"
+                )
+            else:
+                return json_response(False, "Failed to create formatted QR", status=500)
+
+    except Exception as e:
+        app.logger.error(f"QR download failed: {str(e)}")
+        return json_response(False, f"Download failed: {str(e)}", status=500)
+
+def create_formatted_qr(employee_data, qr_path: str) -> str:
+    """Create a formatted QR code image with ID and name"""
+    try:
+        # Create output path
+        output_path = os.path.join(DATA_DIR, f"formatted_qr_{employee_data['ID']}.png")
+
+        # Load QR code
+        qr_img = Image.open(qr_path)
+        qr_size = qr_img.size
+
+        # Calculate dimensions for formatted image
+        padding = 40
+        text_height = 120
+        img_width = max(qr_size[0] + 2 * padding, 400)
+        img_height = qr_size[1] + text_height + 2 * padding
+
+        # Create new image with white background
+        formatted_img = Image.new('RGB', (img_width, img_height), 'white')
+
+        # Paste QR code centered
+        qr_x = (img_width - qr_size[0]) // 2
+        qr_y = padding
+        formatted_img.paste(qr_img, (qr_x, qr_y))
+
+        # Add text
+        draw = ImageDraw.Draw(formatted_img)
+
+        # Try to load a font, fallback to default
+        try:
+            font_large = ImageFont.truetype("arial.ttf", 24)
+            font_medium = ImageFont.truetype("arial.ttf", 18)
+        except:
+            try:
+                font_large = ImageFont.load_default()
+                font_medium = ImageFont.load_default()
+            except:
+                font_large = None
+                font_medium = None
+
+        # Text positions
+        text_y_start = qr_y + qr_size[1] + 20
+
+        # Draw ID
+        id_text = f"ID: {employee_data['ID']}"
+        if font_large:
+            bbox = draw.textbbox((0, 0), id_text, font=font_large)
+            text_width = bbox[2] - bbox[0]
+        else:
+            text_width = len(id_text) * 12  # Estimate
+        text_x = (img_width - text_width) // 2
+
+        draw.text((text_x, text_y_start), id_text, fill='black', font=font_large)
+
+        # Draw Name
+        name_text = employee_data['Name']
+        if font_medium:
+            bbox = draw.textbbox((0, 0), name_text, font=font_medium)
+            text_width = bbox[2] - bbox[0]
+        else:
+            text_width = len(name_text) * 10  # Estimate
+        text_x = (img_width - text_width) // 2
+
+        draw.text((text_x, text_y_start + 35), name_text, fill='black', font=font_medium)
+
+        # Draw Position and Company
+        position_text = f"{employee_data['Position']} - {employee_data['Company']}"
+        if font_medium:
+            bbox = draw.textbbox((0, 0), position_text, font=font_medium)
+            text_width = bbox[2] - bbox[0]
+        else:
+            text_width = len(position_text) * 8  # Estimate
+        text_x = (img_width - text_width) // 2
+
+        draw.text((text_x, text_y_start + 65), position_text, fill='gray', font=font_medium)
+
+        # Save formatted image
+        formatted_img.save(output_path, 'PNG', optimize=True)
+
+        return output_path
+
+    except Exception as e:
+        app.logger.error(f"Failed to create formatted QR: {str(e)}")
+        return None
 
 @app.errorhandler(404)
 def not_found_error(error):
