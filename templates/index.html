@@ -1,23 +1,48 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Smart QR ID Scanner</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <title>Smart QR ID Scanner - Professional ID Management System</title>
+    <meta
+      name="description"
+      content="Modern QR code ID scanning and printing system with real-time processing"
+    />
+
+    <!-- Favicon -->
     <link
       rel="icon"
       type="image/png"
       href="{{ url_for('static', filename='trademark/blurbgicon.png') }}"
     />
-    <script src="https://unpkg.com/html5-qrcode"></script>
     <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
-      rel="stylesheet"
+      rel="apple-touch-icon"
+      href="{{ url_for('static', filename='trademark/blurbgicon.png') }}"
+    />
+
+    <!-- Preload Critical Resources -->
+    <link
+      rel="preload"
+      href="{{ url_for('static', filename='css/index.css') }}"
+      as="style"
     />
     <link
-      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+      rel="preload"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
+      as="style"
+    />
+
+    <!-- External Libraries -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+    <link
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
       rel="stylesheet"
     />
+
+    <!-- Custom Styles -->
     <link
       rel="stylesheet"
       href="{{ url_for('static', filename='css/index.css') }}"
@@ -26,20 +51,37 @@
       rel="stylesheet"
       href="{{ url_for('static', filename='css/button.css') }}"
     />
-  </head>
-  <body class="bg-light">
-    <!-- Modal Overlay (shown on load) -->
-    <div id="settingsModal" class="modal-overlay">
-      <div
-        id="activatePanel"
-        class="bg-white p-4 rounded-lg shadow-lg"
-        style="width: 90%; max-width: 600px; position: relative"
-      >
-        <button class="close-btn" onclick="closeSettingsModal()">
-          <i class="fas fa-times"></i>
-        </button>
 
-        <h4 class="mb-4 text-center">Please Configure Your Settings</h4>
+    <!-- PWA Support -->
+    <meta name="theme-color" content="#6366f1" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  </head>
+  <body>
+    <!-- Skip Link for Accessibility -->
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+
+    <!-- Screen Reader Announcements -->
+    <div id="sr-announcements" class="sr-announcement" aria-live="polite" aria-atomic="true"></div>
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal-overlay hidden">
+      <div class="modal-content" style="width: 90%; max-width: 700px; position: relative">
+        <div id="activatePanel" class="settings-panel">
+          <button class="close-btn" onclick="closeSettingsModal()" aria-label="Close settings">
+            <i class="fas fa-times"></i>
+          </button>
+
+          <div class="settings-header">
+            <div class="flex items-center space-x-3 mb-4">
+              <div class="w-12 h-12 bg-gradient-to-br from-primary to-secondary rounded-xl flex items-center justify-center">
+                <i class="fas fa-cog text-white text-xl"></i>
+              </div>
+              <div>
+                <h2 class="text-2xl font-bold text-gray-900">System Configuration</h2>
+                <p class="text-gray-600">Configure your dataset, template, and printing preferences</p>
+              </div>
+            </div>
+          </div>
 
         <div class="mb-4">
           <strong>📄 Current Active Dataset:</strong>
@@ -164,156 +206,228 @@
       </div>
     </div>
 
-    <div class="container py-5">
+    <!-- Main Application -->
+    <div class="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
+      <!-- Header -->
+      <header class="bg-white shadow-sm border-b border-gray-200">
+        <div class="container mx-auto px-4 py-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+              <img
+                src="{{ url_for('static', filename='trademark/blurbgicon.png') }}"
+                alt="Logo"
+                class="w-10 h-10 rounded-lg"
+              />
+              <div>
+                <h1 class="text-xl font-bold text-gray-900">Smart QR ID Scanner</h1>
+                <p class="text-sm text-gray-500">Professional ID Management System</p>
+              </div>
+            </div>
+
+            <!-- Header Actions -->
+            <div class="flex items-center space-x-4">
+              <!-- Dark Mode Toggle -->
+              <button
+                id="themeToggle"
+                class="theme-toggle"
+                aria-label="Toggle dark mode"
+                title="Toggle dark/light mode"
+              >
+                <i class="fas fa-sun sun-icon"></i>
+                <i class="fas fa-moon moon-icon"></i>
+              </button>
+
+              <!-- Settings Button -->
+              <button
+                class="btn btn-primary btn-sm"
+                onclick="openSettingsModal()"
+                aria-label="Open settings"
+              >
+                <i class="fas fa-cog"></i>
+                <span class="hidden sm:inline">Settings</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Success Alert -->
       {% if success %}
-      <div
-        id="successAlert"
-        class="alert alert-success alert-dismissible fade show"
-        role="alert"
-      >
-        ✅ Activation successful. Dataset and/or template updated.
-        <button
-          type="button"
-          class="btn-close"
-          data-bs-dismiss="alert"
-          aria-label="Close"
-        ></button>
+      <div class="container mx-auto px-4 pt-4">
+        <div
+          id="successAlert"
+          class="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg flex items-center justify-between"
+          role="alert"
+        >
+          <div class="flex items-center">
+            <i class="fas fa-check-circle mr-2"></i>
+            <span>Activation successful. Dataset and/or template updated.</span>
+          </div>
+          <button
+            type="button"
+            class="text-green-600 hover:text-green-800"
+            onclick="this.parentElement.remove()"
+            aria-label="Close"
+          >
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
       </div>
       {% endif %}
 
-      <div class="d-flex justify-content-start mb-3">
-        <button class="settingbtn" onclick="openSettingsModal()">
-          <div id="container-stars">
-            <div id="stars"></div>
-          </div>
-          <div id="glow">
-            <div class="circle"></div>
-            <div class="circle"></div>
-          </div>
-          <strong><i class="fas fa-cog"></i> Settings</strong>
-        </button>
-      </div>
+      <!-- Main Content -->
+      <main id="main-content" class="container mx-auto px-4 py-8" role="main">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <!-- ID Template Preview -->
+          <div class="preview-section" role="region" aria-labelledby="preview-title">
+            <div class="section-title" id="preview-title">
+              <i class="fas fa-id-card" aria-hidden="true"></i>
+              ID Template Preview
+            </div>
 
-      <!-- Main Panel -->
-      <div class="card shadow-lg border-0 rounded p-4">
-        <div class="d-flex flex-wrap justify-content-between gap-4">
-          <!-- ID Template Preview (left side) -->
-          <div
-            class="preview-section flex-grow-1"
-            style="flex-basis: 0; min-width: 0"
-          >
-            <h5 class="section-title mb-2">ID Template Preview</h5>
-            <div
-              id="paperBoundary"
-              class="d-flex align-items-center justify-content-center"
-            >
+            <div class="preview-container">
               <div
-                id="scaledPreviewWrapper"
-                style="transform: scale(1); transform-origin: center center"
+                id="paperBoundary"
+                class="preview-frame"
               >
                 <div
-                  id="idPreviewContainer"
-                  style="
-                    position: relative;
-                    background: white;
-                    box-sizing: content-box;
-                  "
+                  id="scaledPreviewWrapper"
+                  class="preview-wrapper"
                 >
-                  <img
-                    id="id-template-preview"
-                    src="{{ get_template_preview_url(active_template) }}?v={{ config.get('active_dataset', '') }}"
-                    alt="ID Template Preview"
-                    style="
-                      width: 100%;
-                      height: 100%;
-                      object-fit: contain;
-                      background-color: white;
-                      display: block;
-                      z-index: 1;
-                      position: relative;
-                    "
-                    onerror="this.onerror=null;this.src='{{ url_for('static', filename='id_templates/default_template.png') }}'"
-                  />
                   <div
-                    class="position-absolute id-overlay"
-                    style="
-                      inset: 0;
-                      display: flex;
-                      flex-direction: column;
-                      justify-content: center;
-                      align-items: center;
-                      pointer-events: none;
-                      z-index: 2;
-                      color: black;
-                      text-align: center;
-                    "
+                    id="idPreviewContainer"
+                    class="id-preview-container"
                   >
-                    <div id="preview-id" style="font-weight: bold">000</div>
-                    <div style="height: 1rem"></div>
-                    <div id="preview-name" style="font-weight: bold">
-                      Name Here
-                    </div>
-                    <div id="preview-position">Position</div>
-                    <div id="preview-company" style="font-weight: bold">
-                      Company
+                    <img
+                      id="id-template-preview"
+                      src="{{ get_template_preview_url(active_template) }}?v={{ config.get('active_dataset', '') }}"
+                      alt="ID Template Preview"
+                      class="template-image"
+                      onerror="this.onerror=null;this.src='{{ url_for('static', filename='id_templates/default_template.png') }}'"
+                    />
+                    <div class="id-overlay">
+                      <div id="preview-id" class="preview-id">000</div>
+                      <div class="preview-spacer"></div>
+                      <div id="preview-name" class="preview-name">Name Here</div>
+                      <div id="preview-position" class="preview-position">Position</div>
+                      <div id="preview-company" class="preview-company">Company</div>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <div
-              style="
-                position: absolute;
-                bottom: 5px;
-                right: 5px;
-                opacity: 0.7;
-                pointer-events: none;
-                font-size: 8px;
-              "
-            >
-              <img
-                src="{{ url_for('static', filename='trademark/blurbgicon.png') }}"
-                width="20"
-              />
-              ©2025 jLagzn
+
+              <!-- Preview Controls -->
+              <div class="preview-controls mt-4">
+                <div class="flex items-center justify-between text-sm text-gray-600">
+                  <span>Live Preview</span>
+                  <div class="flex items-center space-x-2">
+                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span>Ready</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
-          <!-- Scanner and ID Info (right side) -->
-          <div
-            class="scanner-section flex-grow-1"
-            style="flex-basis: 0; min-width: 0; max-width: 500px"
-          >
-            <h5 class="section-title mb-2">Smart QR ID Scanner</h5>
-
-            <div id="alertBox" class="alert d-none" role="alert"></div>
-            <div class="text-center mb-2">
-              <div
-                class="spinner-border text-light d-none"
-                id="loadingSpinner"
-              ></div>
+          <!-- Scanner Section -->
+          <div class="scanner-section" role="region" aria-labelledby="scanner-title">
+            <div class="section-title" id="scanner-title">
+              <i class="fas fa-qrcode" aria-hidden="true"></i>
+              Smart QR Scanner
             </div>
 
-            <div class="d-flex justify-content-center mb-3">
+            <!-- Alert Box -->
+            <div id="alertBox" class="alert-container mb-4 hidden" role="alert"></div>
+
+            <!-- Loading Spinner -->
+            <div class="text-center mb-4">
+              <div id="loadingSpinner" class="loading-spinner hidden">
+                <div class="spinner">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+                <p class="mt-2 text-sm text-gray-600">Processing...</p>
+              </div>
+            </div>
+
+            <!-- QR Scanner -->
+            <div class="scanner-container mb-6">
               <div
                 id="reader"
-                class="border rounded shadow-sm bg-white"
-                style="
-                  width: 100%;
-                  max-width: 320px;
-                  height: auto;
-                  aspect-ratio: 4 / 3;
-                "
+                class="qr-reader"
+                role="img"
+                aria-label="QR code scanner camera view"
+                aria-describedby="scanner-instructions"
               ></div>
+
+              <!-- Screen reader instructions -->
+              <div id="scanner-instructions" class="sr-only">
+                Point your camera at a QR code to scan employee information.
+                The system will automatically detect and process the QR code.
+              </div>
+
+              <!-- Scanner Status -->
+              <div class="scanner-status mt-3">
+                <div class="flex items-center justify-center space-x-2 text-sm">
+                  <div id="scannerStatus" class="flex items-center space-x-2">
+                    <div class="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+                    <span class="text-gray-600">Initializing camera...</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div class="mt-4">
-              <h5 class="section-title mb-2">ID Info</h5>
-              <div class="border rounded p-3 bg-white shadow-sm">
-                <p><strong>ID:</strong> <span id="id"></span></p>
-                <p><strong>Name:</strong> <span id="name"></span></p>
-                <p><strong>Position:</strong> <span id="position"></span></p>
-                <p><strong>Company:</strong> <span id="company"></span></p>
+            <!-- ID Information Card -->
+            <div class="id-info-card">
+              <div class="section-title">
+                <i class="fas fa-user"></i>
+                Employee Information
+              </div>
+
+              <div class="id-info-content">
+                <div class="info-grid">
+                  <div class="info-item">
+                    <label class="info-label">
+                      <i class="fas fa-hashtag"></i>
+                      ID Number
+                    </label>
+                    <span id="id" class="info-value">---</span>
+                  </div>
+
+                  <div class="info-item">
+                    <label class="info-label">
+                      <i class="fas fa-user"></i>
+                      Full Name
+                    </label>
+                    <span id="name" class="info-value">---</span>
+                  </div>
+
+                  <div class="info-item">
+                    <label class="info-label">
+                      <i class="fas fa-briefcase"></i>
+                      Position
+                    </label>
+                    <span id="position" class="info-value">---</span>
+                  </div>
+
+                  <div class="info-item">
+                    <label class="info-label">
+                      <i class="fas fa-building"></i>
+                      Company
+                    </label>
+                    <span id="company" class="info-value">---</span>
+                  </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="action-buttons mt-4">
+                  <button id="printBtn" class="btn btn-success btn-lg w-full" disabled>
+                    <i class="fas fa-print"></i>
+                    Print ID Card
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -363,34 +477,292 @@
           "9x13": [3.5, 5]
         };
 
+        // Dark Mode Management
+        class ThemeManager {
+          constructor() {
+            this.theme = localStorage.getItem('theme') || 'light';
+            this.init();
+          }
+
+          init() {
+            this.applyTheme();
+            this.setupToggle();
+          }
+
+          applyTheme() {
+            document.documentElement.setAttribute('data-theme', this.theme);
+            localStorage.setItem('theme', this.theme);
+
+            // Update meta theme color
+            const metaTheme = document.querySelector('meta[name="theme-color"]');
+            if (metaTheme) {
+              metaTheme.content = this.theme === 'dark' ? '#1f2937' : '#6366f1';
+            }
+          }
+
+          toggle() {
+            this.theme = this.theme === 'light' ? 'dark' : 'light';
+            this.applyTheme();
+
+            // Add transition effect
+            document.body.style.transition = 'background-color 0.3s ease';
+            setTimeout(() => {
+              document.body.style.transition = '';
+            }, 300);
+          }
+
+          setupToggle() {
+            const toggle = document.getElementById('themeToggle');
+            if (toggle) {
+              toggle.addEventListener('click', () => this.toggle());
+            }
+          }
+        }
+
+        // Enhanced UI Manager
+        class UIManager {
+          constructor() {
+            this.alerts = new Map();
+            this.init();
+          }
+
+          init() {
+            this.setupAlerts();
+            this.setupAnimations();
+          }
+
+          showAlert(message, type = 'info', duration = 5000) {
+            const alertId = Date.now().toString();
+            const alertContainer = document.getElementById('alertBox');
+
+            if (!alertContainer) return;
+
+            alertContainer.className = `alert-container alert-${type}`;
+            alertContainer.innerHTML = `
+              <i class="fas fa-${this.getAlertIcon(type)}"></i>
+              <span>${message}</span>
+              <button onclick="this.parentElement.classList.add('hidden')" class="ml-auto">
+                <i class="fas fa-times"></i>
+              </button>
+            `;
+
+            alertContainer.classList.remove('hidden');
+
+            if (duration > 0) {
+              setTimeout(() => {
+                alertContainer.classList.add('hidden');
+              }, duration);
+            }
+          }
+
+          getAlertIcon(type) {
+            const icons = {
+              success: 'check-circle',
+              warning: 'exclamation-triangle',
+              danger: 'exclamation-circle',
+              info: 'info-circle'
+            };
+            return icons[type] || 'info-circle';
+          }
+
+          setupAnimations() {
+            // Add entrance animations to cards
+            const observer = new IntersectionObserver((entries) => {
+              entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                  entry.target.style.opacity = '1';
+                  entry.target.style.transform = 'translateY(0)';
+                }
+              });
+            });
+
+            document.querySelectorAll('.card, .preview-section, .scanner-section').forEach(el => {
+              el.style.opacity = '0';
+              el.style.transform = 'translateY(20px)';
+              el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+              observer.observe(el);
+            });
+          }
+
+          setupAlerts() {
+            // Auto-hide success alerts
+            {% if success %}
+            setTimeout(() => {
+              const alert = document.getElementById('successAlert');
+              if (alert) {
+                alert.style.opacity = '0';
+                alert.style.transform = 'translateY(-10px)';
+                setTimeout(() => alert.remove(), 300);
+              }
+            }, 5000);
+            {% endif %}
+          }
+        }
+
+        // Accessibility Manager
+        class AccessibilityManager {
+          constructor() {
+            this.announcements = document.getElementById('sr-announcements');
+            this.init();
+          }
+
+          init() {
+            this.setupKeyboardNavigation();
+            this.setupFocusManagement();
+            this.setupAriaLive();
+          }
+
+          announce(message, priority = 'polite') {
+            if (this.announcements) {
+              this.announcements.setAttribute('aria-live', priority);
+              this.announcements.textContent = message;
+
+              // Clear after announcement
+              setTimeout(() => {
+                this.announcements.textContent = '';
+              }, 1000);
+            }
+          }
+
+          setupKeyboardNavigation() {
+            // Detect keyboard usage
+            document.addEventListener('keydown', (e) => {
+              if (e.key === 'Tab') {
+                document.body.classList.add('keyboard-user');
+              }
+            });
+
+            document.addEventListener('mousedown', () => {
+              document.body.classList.remove('keyboard-user');
+            });
+          }
+
+          setupFocusManagement() {
+            // Focus trap for modals
+            const modals = document.querySelectorAll('.modal-overlay');
+            modals.forEach(modal => {
+              modal.addEventListener('keydown', this.trapFocus.bind(this));
+            });
+          }
+
+          trapFocus(e) {
+            if (e.key !== 'Tab') return;
+
+            const modal = e.currentTarget;
+            const focusableElements = modal.querySelectorAll(
+              'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+            );
+
+            const firstElement = focusableElements[0];
+            const lastElement = focusableElements[focusableElements.length - 1];
+
+            if (e.shiftKey && document.activeElement === firstElement) {
+              e.preventDefault();
+              lastElement.focus();
+            } else if (!e.shiftKey && document.activeElement === lastElement) {
+              e.preventDefault();
+              firstElement.focus();
+            }
+          }
+
+          setupAriaLive() {
+            // Update ARIA live regions for dynamic content
+            const observer = new MutationObserver((mutations) => {
+              mutations.forEach((mutation) => {
+                if (mutation.type === 'childList' && mutation.target.id === 'alertBox') {
+                  const alertBox = mutation.target;
+                  if (!alertBox.classList.contains('hidden')) {
+                    this.announce(alertBox.textContent);
+                  }
+                }
+              });
+            });
+
+            const alertBox = document.getElementById('alertBox');
+            if (alertBox) {
+              observer.observe(alertBox, { childList: true, subtree: true });
+            }
+          }
+
+          updateScannerStatus(status) {
+            const statusElement = document.getElementById('scannerStatus');
+            if (statusElement) {
+              statusElement.setAttribute('aria-live', 'polite');
+              this.announce(`Scanner status: ${status}`);
+            }
+          }
+
+          announceEmployeeData(data) {
+            const message = `Employee found: ${data.Name}, ${data.Position} at ${data.Company}, ID number ${data.ID}`;
+            this.announce(message, 'assertive');
+          }
+        }
+
+        // Initialize managers
+        const themeManager = new ThemeManager();
+        const uiManager = new UIManager();
+        const accessibilityManager = new AccessibilityManager();
+
         // Initialize on DOM load
         document.addEventListener("DOMContentLoaded", function() {
           // Show settings modal on first load
           if (!settingsConfigured) {
-            document.getElementById("settingsModal").style.display = "flex";
+            document.getElementById("settingsModal").classList.remove("hidden");
           }
-
-          // Show success alert if needed
-          {% if success %}
-          document.getElementById("successAlert").classList.remove("d-none");
-          setTimeout(() => {
-            const alertBox = document.getElementById("successAlert");
-            if (alertBox) alertBox.remove();
-          }, 3000);
-          {% endif %}
 
           // Set up paper size controls
           setupPaperSizeControls();
+
+          // Initialize camera with better error handling
+          initCameraWithRetry().catch(err => {
+            uiManager.showAlert("Camera initialization failed: " + err.message, "danger");
+          });
         });
 
-        // Modal functions
+        // Enhanced Modal functions
         function openSettingsModal() {
-          document.getElementById("settingsModal").style.display = "flex";
+          const modal = document.getElementById("settingsModal");
+          modal.classList.remove("hidden");
+          document.body.style.overflow = "hidden";
+
+          // Focus management for accessibility
+          const firstFocusable = modal.querySelector('button, input, select');
+          if (firstFocusable) firstFocusable.focus();
         }
 
         function closeSettingsModal() {
-          document.getElementById("settingsModal").style.display = "none";
+          const modal = document.getElementById("settingsModal");
+          modal.classList.add("hidden");
+          document.body.style.overflow = "";
         }
+
+        // Enhanced keyboard navigation
+        document.addEventListener('keydown', function(e) {
+          const modal = document.getElementById("settingsModal");
+
+          if (!modal.classList.contains("hidden")) {
+            if (e.key === 'Escape') {
+              closeSettingsModal();
+            }
+
+            // Trap focus within modal
+            if (e.key === 'Tab') {
+              const focusableElements = modal.querySelectorAll(
+                'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+              );
+              const firstElement = focusableElements[0];
+              const lastElement = focusableElements[focusableElements.length - 1];
+
+              if (e.shiftKey && document.activeElement === firstElement) {
+                e.preventDefault();
+                lastElement.focus();
+              } else if (!e.shiftKey && document.activeElement === lastElement) {
+                e.preventDefault();
+                firstElement.focus();
+              }
+            }
+          }
+        });
 
         function submitSettings() {
           const paperSize = document.getElementById("paperSize").value;
